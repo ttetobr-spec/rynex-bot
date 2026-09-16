@@ -2,7 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder, ChannelType, RoleSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder, ChannelType, RoleSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, ActivityType } = require('discord.js');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'config.json');
@@ -10,7 +10,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({ guilds: {}, memory: {} }, null, 2));
 const db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
-const getGuild = (id) => { db.guilds[id] ||= { enabled: true, adminRoleId: process.env.ADMIN_ROLE_ID || '', adminChannelId: '', qaChannelIds: [], blockedUserIds: [], ticketCategoryId: process.env.TICKET_CATEGORY_ID || '', ticketLogChannelId: process.env.TICKET_LOG_CHANNEL_ID || '', tickets: {}, memory: [] }; const cfg = db.guilds[id]; cfg.tickets ||= {}; cfg.ticketCategoryId ||= process.env.TICKET_CATEGORY_ID || ''; cfg.ticketLogChannelId ||= process.env.TICKET_LOG_CHANNEL_ID || ''; return cfg; };
+const getGuild = (id) => { db.guilds[id] ||= { enabled: true, adminRoleId: process.env.ADMIN_ROLE_ID || '', adminChannelId: '', qaChannelIds: [], blockedUserIds: [], ticketCategoryId: process.env.TICKET_CATEGORY_ID || '', ticketLogChannelId: process.env.TICKET_LOG_CHANNEL_ID || '', tickets: {}, knowledge: [], memory: [] }; const cfg = db.guilds[id]; cfg.tickets ||= {}; cfg.knowledge ||= []; cfg.ticketCategoryId ||= process.env.TICKET_CATEGORY_ID || ''; cfg.ticketLogChannelId ||= process.env.TICKET_LOG_CHANNEL_ID || ''; return cfg; };
 const clean = (s) => String(s || '').replace(/<@!?(\d+)>/g, '').trim();
 const hasAdmin = (member, cfg) => Boolean(member && cfg.adminRoleId && ((member.roles?.cache?.has(cfg.adminRoleId)) || (Array.isArray(member._roles) && member._roles.includes(cfg.adminRoleId))));
 const isMentioned = (message) => message.mentions.users.has(client.user.id) && !message.mentions.everyone;
@@ -26,7 +26,9 @@ async function registerCommands() {
 }
 async function answer(message, prompt, cfg) {
   const memory = (cfg.memory || []).slice(-12).map(x => `${x.role}: ${x.content}`).join('\n');
-  const promptText = `Você é Rynex, assistente de dúvidas de um servidor Discord. Responda em português, de forma objetiva, educada e natural. Nunca revele tokens, chaves ou dados privados. Não diga que é um robô; apresente-se como Rynex. Memória recente:\n${memory || '(vazia)'}\n\nPergunta do usuário: ${prompt}`;
+  const words = prompt.toLowerCase().split(/\s+/).filter(w => w.length >= 4).slice(0, 8);
+  const relevant = (cfg.knowledge || []).filter(x => words.some(w => x.content.toLowerCase().includes(w))).slice(-12).map(x => `[${x.channel}] ${x.author}: ${x.content}`).join('\n');
+  const promptText = `Você é Rynex, assistente de dúvidas de um servidor Discord. Responda em português, de forma objetiva, educada e natural. Use a base de conhecimento abaixo apenas quando for relevante; não invente fatos. Nunca revele tokens, chaves ou dados privados. Não diga que é um robô; apresente-se como Rynex. Memória recente:\n${memory || '(vazia)'}\n\nBase de conhecimento:\n${relevant || '(nenhum registro relevante)'}\n\nPergunta do usuário: ${prompt}`;
   if (!process.env.POLLINATIONS_API_KEY) {
     const legacy = await fetch(`https://text.pollinations.ai/${encodeURIComponent(promptText)}`, { headers: { accept: 'text/plain' } });
     if (legacy.ok) return (await legacy.text()).slice(0, 1900);
@@ -74,7 +76,7 @@ async function adminAction(message, text, cfg) {
   return answer(message, text, cfg);
 }
 
-client.on('ready', async () => { console.log(`Rynex conectado como ${client.user.tag}`); try { await registerCommands(); } catch (e) { console.error('Falha ao registrar comandos:', e.message); } });
+client.on('ready', async () => { client.user.setPresence({ activities: [{ name: 'tickets e dúvidas', type: ActivityType.Watching }], status: 'online' }); console.log(`Rynex conectado como ${client.user.tag} • Assistindo tickets e dúvidas`); try { await registerCommands(); } catch (e) { console.error('Falha ao registrar comandos:', e.message); } });
 client.on('error', (err) => console.error('Erro do cliente Discord:', err.message));
 const handledMessages = new Set();
 client.on('messageCreate', async (message) => {
@@ -82,6 +84,11 @@ client.on('messageCreate', async (message) => {
   if (handledMessages.has(message.id)) return;
   handledMessages.add(message.id); setTimeout(() => handledMessages.delete(message.id), 120000);
   const cfg = getGuild(message.guild.id);
+  const raw = message.content.trim();
+  if (raw && !raw.toLowerCase().startsWith('!painel') && !raw.toLowerCase().startsWith('!ticket painel')) {
+    const safe = raw.replace(/(?:sk-[A-Za-z0-9_-]{20,}|sk_[A-Za-z0-9_-]{20,}|token\s*[:=]\s*\S+|senha\s*[:=]\s*\S+)/gi, '[dado privado removido]').slice(0, 1800);
+    if (safe && !safe.includes('[dado privado removido]')) { cfg.knowledge.push({ author: message.author.username, channel: message.channel.name, content: safe, at: new Date().toISOString() }); cfg.knowledge = cfg.knowledge.slice(-10000); save(); }
+  }
   if (message.content.trim().toLowerCase() === '!painel') {
     const freshMember = await message.guild.members.fetch(message.author.id).catch(() => message.member);
     if (!hasAdmin(freshMember, cfg)) return message.reply({ content: `Apenas o cargo autorizado pode abrir o painel. Cargo configurado: ${cfg.adminRoleId}`, allowedMentions: { repliedUser: false } });
