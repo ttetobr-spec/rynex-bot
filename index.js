@@ -2,7 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder, ChannelType, RoleSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder, ChannelType, RoleSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder } = require('discord.js');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'config.json');
@@ -10,9 +10,9 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({ guilds: {}, memory: {} }, null, 2));
 const db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
-const getGuild = (id) => { db.guilds[id] ||= { enabled: true, adminRoleId: process.env.ADMIN_ROLE_ID || '', adminChannelId: '', qaChannelIds: [], blockedUserIds: [], memory: [] }; return db.guilds[id]; };
+const getGuild = (id) => { db.guilds[id] ||= { enabled: true, adminRoleId: process.env.ADMIN_ROLE_ID || '', adminChannelId: '', qaChannelIds: [], blockedUserIds: [], ticketCategoryId: process.env.TICKET_CATEGORY_ID || '', ticketLogChannelId: process.env.TICKET_LOG_CHANNEL_ID || '', tickets: {}, memory: [] }; const cfg = db.guilds[id]; cfg.tickets ||= {}; cfg.ticketCategoryId ||= process.env.TICKET_CATEGORY_ID || ''; cfg.ticketLogChannelId ||= process.env.TICKET_LOG_CHANNEL_ID || ''; return cfg; };
 const clean = (s) => String(s || '').replace(/<@!?(\d+)>/g, '').trim();
-const hasAdmin = (member, cfg) => Boolean(member && cfg.adminRoleId && member.roles.cache.has(cfg.adminRoleId));
+const hasAdmin = (member, cfg) => Boolean(member && cfg.adminRoleId && ((member.roles?.cache?.has(cfg.adminRoleId)) || (Array.isArray(member._roles) && member._roles.includes(cfg.adminRoleId))));
 const isMentioned = (message) => message.mentions.users.has(client.user.id) && !message.mentions.everyone;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent], partials: [Partials.Channel] });
@@ -83,8 +83,13 @@ client.on('messageCreate', async (message) => {
   handledMessages.add(message.id); setTimeout(() => handledMessages.delete(message.id), 120000);
   const cfg = getGuild(message.guild.id);
   if (message.content.trim().toLowerCase() === '!painel') {
-    if (!hasAdmin(message.member, cfg)) return message.reply({ content: 'Apenas administradores ou o cargo autorizado podem abrir o painel.', allowedMentions: { repliedUser: false } });
+    const freshMember = await message.guild.members.fetch(message.author.id).catch(() => message.member);
+    if (!hasAdmin(freshMember, cfg)) return message.reply({ content: `Apenas o cargo autorizado pode abrir o painel. Cargo configurado: ${cfg.adminRoleId}`, allowedMentions: { repliedUser: false } });
     return message.reply({ embeds: [panelEmbed(message.guild, cfg)], components: panelRows(cfg), allowedMentions: { repliedUser: false } });
+  }
+  if (message.content.trim().toLowerCase() === '!ticket painel') {
+    if (!hasAdmin(message.member, cfg)) return message.reply({ content: 'Apenas o cargo autorizado pode publicar o painel de tickets.', allowedMentions: { repliedUser: false } });
+    return message.channel.send({ embeds: [ticketPanelEmbed()], components: ticketPanelRows() });
   }
   const adminChannel = cfg.adminChannelId && message.channel.id === cfg.adminChannelId;
   const qaChannel = cfg.qaChannelIds.includes(message.channel.id);
@@ -110,12 +115,55 @@ function panelRows(cfg) {
 function panelEmbed(guild, cfg) {
   return new EmbedBuilder().setColor(0x8b5cf6).setAuthor({ name: 'RYNEX • CENTRAL DE CONFIGURAÇÃO', iconURL: client.user.displayAvatarURL() }).setTitle('Painel de controle').setDescription('Configure tudo por aqui usando os botões abaixo. Apenas administradores ou o cargo autorizado podem usar este painel.').addFields({ name: 'IA', value: cfg.enabled ? '🟢 Ativada' : '🔴 Desativada', inline: true }, { name: 'Cargo autorizado', value: cfg.adminRoleId ? `<@&${cfg.adminRoleId}>` : 'Não configurado', inline: true }, { name: 'Canal ADM', value: cfg.adminChannelId ? `<#${cfg.adminChannelId}>` : 'Não configurado', inline: true }, { name: 'Canais de dúvidas', value: cfg.qaChannelIds.length ? cfg.qaChannelIds.map(id => `<#${id}>`).join(', ') : 'Nenhum', inline: false }).setFooter({ text: `${guild.name} • Rynex` }).setTimestamp();
 }
+function ticketPanelEmbed() {
+  return new EmbedBuilder().setColor(0x7c3aed).setTitle('🎫 Central de Atendimento').setDescription('Precisa de ajuda? Abra um atendimento privado escolhendo uma categoria abaixo.\n\n> **Privacidade:** somente você e a equipe de suporte terão acesso.\n> **Atendimento:** aguarde um membro da equipe assumir seu ticket.').addFields({ name: '📌 Antes de abrir', value: 'Explique seu problema com detalhes e envie provas, IDs ou imagens quando necessário.' }, { name: '🛡️ Segurança', value: 'Nunca envie senhas, tokens ou dados confidenciais.' }).setFooter({ text: 'Rynex Support • Atendimento organizado' }).setTimestamp();
+}
+function ticketPanelRows() {
+  return [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('ticket:open').setPlaceholder('Selecione o tipo de atendimento').addOptions({ label: 'Suporte geral', description: 'Dúvidas e ajuda com o servidor', value: 'suporte', emoji: '🛠️' }, { label: 'Compras e pedidos', description: 'Dúvidas sobre produtos ou pedidos', value: 'compras', emoji: '🛒' }, { label: 'Denúncia', description: 'Relatar um problema ou usuário', value: 'denuncia', emoji: '🚨' }, { label: 'Parceria', description: 'Propostas e colaborações', value: 'parceria', emoji: '🤝' }))];
+}
+function ticketControls() {
+  return [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('ticket:claim').setLabel('Assumir ticket').setEmoji('📥').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('ticket:notify').setLabel('Notificar autor').setEmoji('🔔').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('ticket:close').setLabel('Fechar ticket').setEmoji('🔒').setStyle(ButtonStyle.Danger))];
+}
+function isSupport(member, cfg) { return hasAdmin(member, cfg); }
+function ticketData(cfg, channelId) { return cfg.tickets?.[channelId]; }
+async function openTicket(interaction, cfg, type) {
+  const existing = Object.entries(cfg.tickets || {}).find(([, t]) => t.userId === interaction.user.id && t.open);
+  if (existing) return interaction.reply({ content: `Você já possui um atendimento aberto: <#${existing[0]}>`, ephemeral: true });
+  const safe = interaction.user.username.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 20) || 'usuario';
+  const channel = await interaction.guild.channels.create({ name: `ticket-${safe}`, type: ChannelType.GuildText, parent: cfg.ticketCategoryId || undefined, topic: `Ticket de ${interaction.user.tag} • categoria: ${type}`, permissionOverwrites: [{ id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] }, { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.AttachFiles] }, ...(cfg.adminRoleId ? [{ id: cfg.adminRoleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageMessages] }] : [])], reason: 'Abertura de ticket Rynex' });
+  cfg.tickets[channel.id] = { userId: interaction.user.id, type, open: true, claimedBy: null, createdAt: new Date().toISOString() }; save();
+  const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🎫 Atendimento • ${type}`).setDescription(`Olá <@${interaction.user.id}>! Seu ticket foi criado.\n\nExplique aqui como podemos ajudar. Um membro da equipe será avisado quando assumir o atendimento.`).addFields({ name: '👤 Autor', value: `<@${interaction.user.id}>`, inline: true }, { name: '📂 Categoria', value: type, inline: true }, { name: '📌 Status', value: 'Aguardando suporte', inline: true }).setFooter({ text: 'Rynex Support' }).setTimestamp();
+  const mention = cfg.adminRoleId ? `<@&${cfg.adminRoleId}>` : '';
+  await channel.send({ content: `${mention} novo atendimento aberto por <@${interaction.user.id}>`, embeds: [embed], components: ticketControls(), allowedMentions: { roles: cfg.adminRoleId ? [cfg.adminRoleId] : [], users: [interaction.user.id] } });
+  return interaction.reply({ content: `✅ Atendimento criado: ${channel}`, ephemeral: true });
+}
 client.on('interactionCreate', async (interaction) => {
   try {
   if (interaction.isButton() && interaction.customId.startsWith('giveaway:')) return interaction.reply({ content: 'Você entrou no sorteio! Boa sorte.', ephemeral: true });
   if (!interaction.guild) return;
   const cfg = getGuild(interaction.guild.id); const admin = hasAdmin(interaction.member, cfg);
   if (interaction.isChatInputCommand()) return;
+  if (interaction.isStringSelectMenu() && interaction.customId === 'ticket:open') return openTicket(interaction, cfg, interaction.values[0]);
+  const currentTicket = ticketData(cfg, interaction.channelId);
+  if (interaction.isButton() && interaction.customId.startsWith('ticket:') && !currentTicket) return interaction.reply({ content: 'Este atendimento não está mais ativo.', ephemeral: true });
+  if (interaction.isButton() && interaction.customId === 'ticket:claim') {
+    if (!isSupport(interaction.member, cfg)) return interaction.reply({ content: 'Somente a equipe autorizada pode assumir tickets.', ephemeral: true });
+    if (currentTicket.claimedBy && currentTicket.claimedBy !== interaction.user.id) return interaction.reply({ content: `Este ticket já foi assumido por <@${currentTicket.claimedBy}>.`, ephemeral: true });
+    currentTicket.claimedBy = interaction.user.id; save();
+    const embed = new EmbedBuilder().setColor(0x22c55e).setTitle('✅ Atendimento assumido').setDescription(`<@${interaction.user.id}> assumiu este atendimento e responderá você em breve.`).setTimestamp();
+    return interaction.reply({ embeds: [embed] });
+  }
+  if (interaction.isButton() && interaction.customId === 'ticket:notify') {
+    if (!isSupport(interaction.member, cfg)) return interaction.reply({ content: 'Somente a equipe autorizada pode notificar o autor.', ephemeral: true });
+    try { const user = await client.users.fetch(currentTicket.userId); await user.send(`🔔 A equipe respondeu ou atualizou seu atendimento em **${interaction.guild.name}**: <#${interaction.channelId}>`); return interaction.reply({ content: 'Notificação enviada por mensagem privada.', ephemeral: true }); } catch (_) { return interaction.reply({ content: 'Não consegui enviar DM. O usuário pode ter mensagens privadas bloqueadas.', ephemeral: true }); }
+  }
+  if (interaction.isButton() && interaction.customId === 'ticket:close') {
+    if (!isSupport(interaction.member, cfg) && interaction.user.id !== currentTicket.userId) return interaction.reply({ content: 'Somente o autor ou a equipe pode fechar este atendimento.', ephemeral: true });
+    await interaction.reply({ content: '🔒 Atendimento encerrado. Este canal será removido em alguns segundos.', ephemeral: true });
+    currentTicket.open = false; currentTicket.closedBy = interaction.user.id; currentTicket.closedAt = new Date().toISOString(); save();
+    if (cfg.ticketLogChannelId) { const log = await interaction.guild.channels.fetch(cfg.ticketLogChannelId).catch(() => null); if (log?.isTextBased()) await log.send({ embeds: [new EmbedBuilder().setColor(0xef4444).setTitle('📁 Ticket encerrado').addFields({ name: 'Canal', value: `#${interaction.channel.name}`, inline: true }, { name: 'Autor', value: `<@${currentTicket.userId}>`, inline: true }, { name: 'Encerrado por', value: `<@${interaction.user.id}>`, inline: true }, { name: 'Categoria', value: currentTicket.type, inline: true }).setTimestamp()] }); }
+    setTimeout(() => interaction.channel.delete('Ticket encerrado pelo Rynex').catch(() => {}), 5000); return;
+  }
   if (!admin || (!interaction.isButton() && !interaction.isRoleSelectMenu() && !interaction.isModalSubmit())) return;
   if (interaction.isRoleSelectMenu() && interaction.customId === 'panel:role') { cfg.adminRoleId = interaction.values[0]; save(); return interaction.update({ embeds: [panelEmbed(interaction.guild, cfg)], components: panelRows(cfg) }); }
   if (interaction.isButton() && interaction.customId === 'panel:ia') { cfg.enabled = !cfg.enabled; save(); return interaction.update({ embeds: [panelEmbed(interaction.guild, cfg)], components: panelRows(cfg) }); }
