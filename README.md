@@ -34,7 +34,7 @@ Somente a equipe autorizada pode usar `/aceitar` ou `/recusar` dentro do ticket 
 
 Os tickets agora exibem controles de staff para assumir, notificar, fechar, adicionar participante, renomear, pedir ajuda e criar uma call. Ao fechar um ticket, o bot tenta gerar um transcript em texto no canal de logs e envia ao autor uma avaliação de uma a cinco estrelas.
 
-Os comandos `/produto`, `/resposta`, `/pedido`, `/limpar` e `/relatorio` permitem, respectivamente, manter um catálogo oficial de preços, cadastrar respostas rápidas, abrir tickets de pedido, apagar mensagens com permissão adequada e consultar estatísticas básicas. A IA recebe o catálogo oficial junto com a base de conhecimento para responder preços de forma mais consistente.
+O painel ADM concentra as funções administrativas em botões privados: **Relatório por ID**, **Ver logs**, **Enviar DM** e **Enviar no canal**. O relatório consulta apenas dados que o bot registrou no servidor, como mensagens observadas e tickets do usuário informado; ele não acessa DMs privadas. As mensagens enviadas pelo painel ficam sem menções automáticas e as ações são registradas no histórico administrativo.
 
 ## Variáveis de ambiente
 
