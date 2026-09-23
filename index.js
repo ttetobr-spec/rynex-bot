@@ -7,6 +7,7 @@ const { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder, 
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
 const play = require('play-dl');
 const ytdl = require('youtube-dl-exec');
+const { RARITY_PROBABILITIES, ensureCards, findCard, formatPrice } = require('./cards');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'config.json');
@@ -15,7 +16,15 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({ guilds: {}, memory: {} }, null, 2));
 const db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
-const getGuild = (id) => { db.guilds[id] ||= { enabled: true, iaChangedAt: new Date().toISOString(), adminRoleId: process.env.ADMIN_ROLE_ID || DEFAULT_ADMIN_ROLE_ID, aiRoleId: '', ticketParentChannelId: '', ticketBannerUrl: '', ticketEmojis: {}, adminChannelId: '', qaChannelIds: [], blockedUserIds: [], ticketCategoryId: process.env.TICKET_CATEGORY_ID || '', ticketLogChannelId: process.env.TICKET_LOG_CHANNEL_ID || '', tickets: {}, knowledge: [], memory: [], products: {}, quickReplies: {}, orders: {}, ratings: [], warnings: {}, giveaway: null }; const cfg = db.guilds[id]; cfg.adminRoleId ||= process.env.ADMIN_ROLE_ID || DEFAULT_ADMIN_ROLE_ID; cfg.aiRoleId ||= ''; cfg.ticketParentChannelId ||= ''; cfg.ticketBannerUrl ||= ''; cfg.ticketEmojis ||= {}; cfg.iaChangedAt ||= new Date().toISOString(); cfg.tickets ||= {}; cfg.knowledge ||= []; cfg.products ||= {}; cfg.quickReplies ||= {}; cfg.orders ||= {}; cfg.ratings ||= []; cfg.warnings ||= {}; return cfg; };
+const getGuild = (id) => {
+  db.guilds[id] ||= { enabled: true, iaChangedAt: new Date().toISOString(), adminRoleId: process.env.ADMIN_ROLE_ID || DEFAULT_ADMIN_ROLE_ID, aiRoleId: '', ticketParentChannelId: '', ticketBannerUrl: '', ticketEmojis: {}, adminChannelId: '', qaChannelIds: [], blockedUserIds: [], ticketCategoryId: process.env.TICKET_CATEGORY_ID || '', ticketLogChannelId: process.env.TICKET_LOG_CHANNEL_ID || '', tickets: {}, knowledge: [], memory: [], products: {}, cards: {}, quickReplies: {}, orders: {}, ratings: [], warnings: {}, giveaway: null };
+  const cfg = db.guilds[id];
+  cfg.adminRoleId ||= process.env.ADMIN_ROLE_ID || DEFAULT_ADMIN_ROLE_ID;
+  cfg.aiRoleId ||= ''; cfg.ticketParentChannelId ||= ''; cfg.ticketBannerUrl ||= ''; cfg.ticketEmojis ||= {}; cfg.iaChangedAt ||= new Date().toISOString();
+  cfg.tickets ||= {}; cfg.knowledge ||= []; cfg.products ||= {}; cfg.cards ||= {}; cfg.quickReplies ||= {}; cfg.orders ||= {}; cfg.ratings ||= []; cfg.warnings ||= {};
+  ensureCards(cfg);
+  return cfg;
+};
 const clean = (s) => String(s || '').replace(/<@!?(\d+)>/g, '').trim();
 const hasAdmin = (member, cfg) => { const roleId = cfg.adminRoleId || process.env.ADMIN_ROLE_ID || DEFAULT_ADMIN_ROLE_ID; return Boolean(member && roleId && ((member.roles?.cache?.has(roleId)) || (Array.isArray(member._roles) && member._roles.includes(roleId)))); };
 const isMentioned = (message) => message.mentions.users.has(client.user.id) && !message.mentions.everyone;
@@ -28,8 +37,23 @@ slashCommands.push(new SlashCommandBuilder().setName('1').setDescription('Entrar
 slashCommands.push(new SlashCommandBuilder().setName('pix').setDescription('Exibir as instruções seguras de ativação e abrir atendimento').toJSON());
 slashCommands.push(new SlashCommandBuilder().setName('aceitar').setDescription('Aprovar manualmente uma solicitação no ticket atual').toJSON());
 slashCommands.push(new SlashCommandBuilder().setName('recusar').setDescription('Recusar manualmente uma solicitação no ticket atual').toJSON());
+slashCommands.push(new SlashCommandBuilder().setName('cartas').setDescription('Listar as cartas cadastradas').toJSON());
+slashCommands.push(new SlashCommandBuilder().setName('carta').setDescription('Consultar uma carta pelo nome').addStringOption(option => option.setName('nome').setDescription('Nome da carta').setRequired(true)).toJSON());
 const PIX_KEY = 'c52cf65e-27ae-46d0-972e-578f6890e4fb';
 const PAYMENT_STAFF_ROLE_ID = '1518349199110967568';
+
+function cardEmbed(card) {
+  const probability = RARITY_PROBABILITIES[card.rarity];
+  return new EmbedBuilder().setColor(card.rarity === 'Comum' ? 0x94a3b8 : 0x7c3aed).setTitle(`🃏 ${card.name}`).setDescription(`**Raridade:** ${card.rarity}\n**Chance da raridade:** ${String(probability).replace('.', ',')}%\n**Preço:** ${formatPrice(card.price)}`).setImage('attachment://ceala.png').setFooter({ text: 'Rynex Store • Catálogo de cartas' });
+}
+function cardsListEmbed(cards) {
+  const list = Object.values(cards).map(card => `• **${card.name}** — ${card.rarity} — ${formatPrice(card.price)}`).join('\n');
+  const probabilities = Object.entries(RARITY_PROBABILITIES).map(([rarity, chance]) => `${rarity}: ${String(chance).replace('.', ',')}%`).join(' • ');
+  return new EmbedBuilder().setColor(0x7c3aed).setTitle('🃏 Catálogo de cartas').setDescription(`${list || 'Nenhuma carta cadastrada.'}\n\n**Probabilidades:** ${probabilities}`).setFooter({ text: 'Rynex Store • Catálogo de cartas' });
+}
+function cardFiles(card) {
+  return card.image && fs.existsSync(card.image) ? [{ attachment: card.image, name: 'ceala.png' }] : [];
+}
 
 function sessionFor(guildId) { if (!voiceSessions.has(guildId)) { const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } }); const session = { player, connection: null, channelId: null, queue: [] }; player.on(AudioPlayerStatus.Idle, () => playNext(guildId).catch(console.error)); voiceSessions.set(guildId, session); } return voiceSessions.get(guildId); }
 async function joinVoice(guild, channel) {
@@ -74,7 +98,8 @@ async function answer(message, prompt, cfg) {
   const words = prompt.toLowerCase().split(/\s+/).filter(w => w.length >= 4).slice(0, 8);
   const relevant = (cfg.knowledge || []).filter(x => words.some(w => x.content.toLowerCase().includes(w))).slice(-12).map(x => `[${x.channel}] ${x.author}: ${x.content}`).join('\n');
   const products = Object.entries(cfg.products || {}).map(([name, p]) => `${name}: ${p.price}${p.info ? ` — ${p.info}` : ''}`).join('\n');
-  const promptText = `Você é Rynex, assistente de dúvidas de um servidor Discord. Responda em português, de forma objetiva, educada e natural. Priorize o catálogo oficial quando houver correspondência. Use a base de conhecimento abaixo apenas quando for relevante; não invente fatos. Nunca revele tokens, chaves ou dados privados. Não diga que é um robô; apresente-se como Rynex. Catálogo oficial:\n${products || '(vazio)'}\n\nMemória recente:\n${memory || '(vazia)'}\n\nBase de conhecimento:\n${relevant || '(nenhum registro relevante)'}\n\nPergunta do usuário: ${prompt}`;
+  const cards = Object.values(cfg.cards || {}).map(card => `${card.name}: ${card.rarity}, ${formatPrice(card.price)}, chance da raridade ${String(RARITY_PROBABILITIES[card.rarity]).replace('.', ',')}%`).join('\n');
+  const promptText = `Você é Rynex, assistente de dúvidas de um servidor Discord. Responda em português, de forma objetiva, educada e natural. Priorize o catálogo oficial quando houver correspondência. Use a base de conhecimento abaixo apenas quando for relevante; não invente fatos. Nunca revele tokens, chaves ou dados privados. Não diga que é um robô; apresente-se como Rynex. Catálogo oficial:\n${products || '(vazio)'}\n\nCatálogo de cartas:\n${cards || '(vazio)'}\n\nMemória recente:\n${memory || '(vazia)'}\n\nBase de conhecimento:\n${relevant || '(nenhum registro relevante)'}\n\nPergunta do usuário: ${prompt}`;
   if (!process.env.POLLINATIONS_API_KEY) {
     const legacy = await fetch(`https://text.pollinations.ai/${encodeURIComponent(promptText)}`, { headers: { accept: 'text/plain' } });
     if (legacy.ok) return (await legacy.text()).slice(0, 1900);
@@ -204,6 +229,12 @@ client.on('messageCreate', async (message) => {
     if (safe && !safe.includes('[dado privado removido]')) { cfg.knowledge.push({ userId: message.author.id, author: message.author.username, channel: message.channel.name, content: safe, at: new Date().toISOString() }); cfg.knowledge = cfg.knowledge.slice(-10000); save(); }
   }
   const command = message.content.trim().toLowerCase();
+  if (command === '!cartas') return message.reply({ embeds: [cardsListEmbed(cfg.cards)], allowedMentions: { repliedUser: false } });
+  if (command.startsWith('!carta')) {
+    const card = findCard(cfg.cards, message.content.trim().replace(/^!carta\s*/i, ''));
+    if (!card) return message.reply({ content: 'Não encontrei essa carta no catálogo. Use `!cartas` para ver as cartas cadastradas.', allowedMentions: { repliedUser: false } });
+    return message.reply({ embeds: [cardEmbed(card)], files: cardFiles(card), allowedMentions: { repliedUser: false } });
+  }
   if (command === '!entra' || /^(entra|entre)\s+(a[ií]|aqui)$/i.test(command)) { try { const member = await message.guild.members.fetch(message.author.id).catch(() => message.member); const channel = member?.voice?.channel; await joinVoice(message.guild, channel); return message.reply({ content: `Entrei na chamada **${channel.name}**.`, allowedMentions: { repliedUser: false } }); } catch (err) { return message.reply({ content: err.message, allowedMentions: { repliedUser: false } }); } }
   const youtube = message.content.trim().match(/^!\s*(https?:\/\/\S+)/i);
   if (youtube) return queueYouTube(message, youtube[1]);
@@ -301,6 +332,12 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName === 'pix') return interaction.reply({ embeds: [pixEmbed()], components: pixRows(), allowedMentions: { parse: [] } });
     if (interaction.commandName === 'aceitar') return setPaymentStatus(interaction, cfg, true);
     if (interaction.commandName === 'recusar') return setPaymentStatus(interaction, cfg, false);
+    if (interaction.commandName === 'cartas') return interaction.reply({ embeds: [cardsListEmbed(cfg.cards)], allowedMentions: { parse: [] } });
+    if (interaction.commandName === 'carta') {
+      const card = findCard(cfg.cards, interaction.options.getString('nome'));
+      if (!card) return interaction.reply({ content: 'Não encontrei essa carta no catálogo.', ephemeral: true });
+      return interaction.reply({ embeds: [cardEmbed(card)], files: cardFiles(card), allowedMentions: { parse: [] } });
+    }
     return;
   }
   if (interaction.isButton() && interaction.customId.startsWith('rating:')) {
