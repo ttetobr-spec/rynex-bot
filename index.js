@@ -7,8 +7,9 @@ const { Client, GatewayIntentBits, Partials, PermissionsBitField, EmbedBuilder, 
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
 const play = require('play-dl');
 const ytdl = require('youtube-dl-exec');
+const { createStoreApi, registerStoreCommands } = require('./store');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'config.json');
 const DEFAULT_ADMIN_ROLE_ID = '1533477047144419612';
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -28,8 +29,10 @@ slashCommands.push(new SlashCommandBuilder().setName('1').setDescription('Entrar
 slashCommands.push(new SlashCommandBuilder().setName('pix').setDescription('Exibir as instruções seguras de ativação e abrir atendimento').toJSON());
 slashCommands.push(new SlashCommandBuilder().setName('aceitar').setDescription('Aprovar manualmente uma solicitação no ticket atual').toJSON());
 slashCommands.push(new SlashCommandBuilder().setName('recusar').setDescription('Recusar manualmente uma solicitação no ticket atual').toJSON());
-const PIX_KEY = 'c52cf65e-27ae-46d0-972e-578f6890e4fb';
+registerStoreCommands(slashCommands);
+const PIX_KEY = process.env.PIX_KEY || 'chave Pix ainda não configurada';
 const PAYMENT_STAFF_ROLE_ID = '1518349199110967568';
+let storeApi = null;
 
 function sessionFor(guildId) { if (!voiceSessions.has(guildId)) { const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } }); const session = { player, connection: null, channelId: null, queue: [] }; player.on(AudioPlayerStatus.Idle, () => playNext(guildId).catch(console.error)); voiceSessions.set(guildId, session); } return voiceSessions.get(guildId); }
 async function joinVoice(guild, channel) {
@@ -189,7 +192,7 @@ async function adminAction(message, text, cfg) {
   return answer(message, text, cfg);
 }
 
-client.on('ready', async () => { client.user.setPresence({ activities: [], status: 'online' }); for (const guild of client.guilds.cache.values()) await autoJoinBotOnline(guild); console.log(`Rynex conectado como ${client.user.tag} • status online`); try { await registerCommands(); } catch (e) { console.error('Falha ao registrar comandos:', e.message); } });
+client.on('ready', async () => { client.user.setPresence({ activities: [], status: 'online' }); for (const guild of client.guilds.cache.values()) await autoJoinBotOnline(guild); console.log(`Rynex conectado como ${client.user.tag} • status online`); try { await registerCommands(); await storeApi?.syncPendingChannels(); } catch (e) { console.error('Falha ao registrar comandos ou sincronizar pedidos:', e.message); } });
 client.on('voiceStateUpdate', async (oldState, newState) => { if (oldState.member?.id !== client.user?.id || newState.channelId) return; const session = voiceSessions.get(oldState.guild.id); if (!session) return; const channel = oldState.guild.channels.cache.get(session.channelId) || oldState.guild.channels.cache.find(c => c.isVoiceBased() && c.name.toLowerCase().replace(/[-_]/g, ' ') === 'bot online'); if (channel) setTimeout(() => joinVoice(oldState.guild, channel).catch(() => {}), 2500); });
 client.on('error', (err) => console.error('Erro do cliente Discord:', err.message));
 const handledMessages = new Set();
@@ -199,6 +202,8 @@ client.on('messageCreate', async (message) => {
   handledMessages.add(message.id); setTimeout(() => handledMessages.delete(message.id), 120000);
   const cfg = getGuild(message.guild.id);
   const raw = message.content.trim();
+  const storeOrder = storeApi?.findOrderByChannel(message.channel.id);
+  if (storeOrder && raw) storeApi.captureDiscordMessage(message, storeOrder);
   if (raw && !raw.toLowerCase().startsWith('!painel') && !raw.toLowerCase().startsWith('!ticket painel')) {
     const safe = raw.replace(/(?:sk-[A-Za-z0-9_-]{20,}|sk_[A-Za-z0-9_-]{20,}|token\s*[:=]\s*\S+|senha\s*[:=]\s*\S+)/gi, '[dado privado removido]').slice(0, 1800);
     if (safe && !safe.includes('[dado privado removido]')) { cfg.knowledge.push({ userId: message.author.id, author: message.author.username, channel: message.channel.name, content: safe, at: new Date().toISOString() }); cfg.knowledge = cfg.knowledge.slice(-10000); save(); }
@@ -253,7 +258,8 @@ function panelRows(cfg) {
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('panel:admin').setLabel('Definir canal ADM').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('panel:qa').setLabel('Adicionar canal de dúvidas').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('panel:ticket-config').setLabel('Configurar tickets e IA').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('panel:ticket-visual').setLabel('Banner e emojis').setStyle(ButtonStyle.Secondary)),
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('panel:create-role').setLabel('Criar cargo').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('panel:create-channel').setLabel('Criar canal').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('panel:giveaway').setLabel('Criar sorteio').setStyle(ButtonStyle.Secondary)),
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('panel:report-user').setLabel('Relatório por ID').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('panel:logs').setLabel('Ver logs').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('panel:send-dm').setLabel('Enviar DM').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('panel:send-channel').setLabel('Enviar no canal').setStyle(ButtonStyle.Primary)),
-    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('panel:role').setPlaceholder('Selecione o cargo autorizado'))
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('panel:role').setPlaceholder('Selecione o cargo autorizado')),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('panel:store-help').setLabel('Loja, pedidos e cupom').setStyle(ButtonStyle.Success))
   ];
 }
 function panelEmbed(guild, cfg) {
@@ -297,6 +303,7 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.guild) return;
   const cfg = getGuild(interaction.guild.id); const admin = hasAdmin(interaction.member, cfg);
   if (interaction.isChatInputCommand()) {
+    if (storeApi && await storeApi.handleInteraction(interaction, cfg)) return;
     if (interaction.commandName === '1') return playFixedMusic(interaction);
     if (interaction.commandName === 'pix') return interaction.reply({ embeds: [pixEmbed()], components: pixRows(), allowedMentions: { parse: [] } });
     if (interaction.commandName === 'aceitar') return setPaymentStatus(interaction, cfg, true);
@@ -360,6 +367,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isRoleSelectMenu() && interaction.customId === 'panel:role') { cfg.adminRoleId = interaction.values[0]; save(); return interaction.update({ embeds: [panelEmbed(interaction.guild, cfg)], components: panelRows(cfg) }); }
   if (interaction.isButton() && interaction.customId === 'panel:ia') { cfg.enabled = !cfg.enabled; cfg.iaChangedAt = new Date().toISOString(); save(); return interaction.update({ embeds: [panelEmbed(interaction.guild, cfg)], components: panelRows(cfg) }); }
   if (interaction.isButton() && interaction.customId === 'panel:refresh') return interaction.update({ embeds: [panelEmbed(interaction.guild, cfg)], components: panelRows(cfg) });
+  if (interaction.isButton() && interaction.customId === 'panel:store-help') return interaction.reply({ content: '**Comandos da loja**\n`/produto-adicionar` • `/produto-editar` • `/produto-remover` • `/produto-listar`\n`/config-categorias` • `/config-cupom` • `/config-site`\n\n**Pedidos**\n`/pedido-aceitar id:RX-...` confirma o pagamento e cria o canal privado.\n`/pedido-recusar id:RX-...` marca o pagamento como recusado.\n\nO cupom configurado com 100% zera o pedido de teste e abre o canal automaticamente.', ephemeral: true });
   if (interaction.isButton() && interaction.customId === 'panel:logs') { if (!admin) return interaction.reply({ content: 'Somente a equipe autorizada pode ver os logs.', ephemeral: true }); return interaction.reply({ embeds: [logsEmbed(cfg)], ephemeral: true }); }
   if (interaction.isButton() && interaction.customId === 'panel:report-user') { if (!admin) return interaction.reply({ content: 'Somente a equipe autorizada pode consultar relatórios.', ephemeral: true }); const modal = new ModalBuilder().setCustomId('panel:report-user:modal').setTitle('Relatório por usuário').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('userId').setLabel('ID do usuário').setPlaceholder('Cole o ID do Discord').setStyle(TextInputStyle.Short).setRequired(true))); return interaction.showModal(modal); }
   if (interaction.isButton() && interaction.customId === 'panel:send-dm') { if (!admin) return interaction.reply({ content: 'Somente a equipe autorizada pode enviar DMs.', ephemeral: true }); const modal = new ModalBuilder().setCustomId('panel:send-dm:modal').setTitle('Enviar mensagem privada').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('userId').setLabel('ID do usuário').setStyle(TextInputStyle.Short).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('message').setLabel('Mensagem').setStyle(TextInputStyle.Paragraph).setMaxLength(1900).setRequired(true))); return interaction.showModal(modal); }
@@ -382,11 +390,12 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 const app = express(); app.use(express.json());
-const panelKey = process.env.ADMIN_PANEL_KEY || 'troque-esta-chave';
+storeApi = createStoreApi({ app, client, db, save, getGuild });
+const panelKey = process.env.ADMIN_PANEL_KEY || '';
 app.get('/', (_, res) => res.send('<h1>Rynex online</h1><p>Bot Discord ativo.</p>'));
 app.get('/health', (_, res) => res.json({ ok: true, bot: client.user?.tag || null }));
-app.get('/api/config/:guildId', (req, res) => { if (req.headers.authorization !== `Bearer ${panelKey}`) return res.status(401).json({ error: 'unauthorized' }); res.json(getGuild(req.params.guildId)); });
-app.post('/api/config/:guildId', (req, res) => { if (req.headers.authorization !== `Bearer ${panelKey}`) return res.status(401).json({ error: 'unauthorized' }); const cfg = getGuild(req.params.guildId); const allowed = ['enabled','adminRoleId','adminChannelId','qaChannelIds','blockedUserIds']; for (const k of allowed) if (req.body[k] !== undefined) cfg[k] = req.body[k]; save(); res.json(cfg); });
+app.get('/api/config/:guildId', (req, res) => { if (!panelKey || req.headers.authorization !== `Bearer ${panelKey}`) return res.status(401).json({ error: 'unauthorized' }); res.json(getGuild(req.params.guildId)); });
+app.post('/api/config/:guildId', (req, res) => { if (!panelKey || req.headers.authorization !== `Bearer ${panelKey}`) return res.status(401).json({ error: 'unauthorized' }); const cfg = getGuild(req.params.guildId); const allowed = ['enabled','adminRoleId','adminChannelId','qaChannelIds','blockedUserIds']; for (const k of allowed) if (req.body[k] !== undefined) cfg[k] = req.body[k]; save(); res.json(cfg); });
 const port = Number(process.env.PORT || 3000); app.listen(port, '0.0.0.0', () => console.log(`Painel HTTP na porta ${port}`));
 async function loginWithRetry() {
   if (!process.env.DISCORD_TOKEN) return console.error('DISCORD_TOKEN não configurado.');

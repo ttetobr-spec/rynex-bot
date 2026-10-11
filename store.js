@@ -1,0 +1,561 @@
+const crypto = require('crypto');
+const {
+  ActionRowBuilder,
+  EmbedBuilder,
+  PermissionsBitField,
+  SlashCommandBuilder,
+  ChannelType,
+} = require('discord.js');
+
+const DEFAULT_CATEGORIES = ['Techwear', 'Essentials', 'Footwear', 'Accessories'];
+const COMMAND_NAMES = new Set([
+  'produto-adicionar',
+  'produto-editar',
+  'produto-remover',
+  'produto-listar',
+  'config-categorias',
+  'config-cupom',
+  'config-site',
+  'pedido-aceitar',
+  'pedido-recusar',
+]);
+
+function slugify(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 52);
+}
+
+function cleanText(value, max = 500) {
+  return String(value ?? '').replace(/[<>]/g, '').trim().slice(0, max);
+}
+
+function redact(value) {
+  return cleanText(value, 1900).replace(
+    /(?:sk-[A-Za-z0-9_-]{20,}|sk_[A-Za-z0-9_-]{20,}|token\s*[:=]\s*\S+|senha\s*[:=]\s*\S+)/gi,
+    '[dado privado removido]',
+  );
+}
+
+function ensureStore(cfg) {
+  cfg.products ||= {};
+  cfg.storeCategories ||= [...DEFAULT_CATEGORIES];
+  cfg.storeSettings ||= {
+    brandName: 'Rynex',
+    heroTitle: 'Vista seu próximo sinal.',
+    supportEmail: '',
+    checkoutNote: 'Pagamento manual via Pix. A entrega é feita pela equipe no atendimento.',
+  };
+  cfg.storeCoupon ||= {
+    code: process.env.TEST_COUPON_CODE || 'RYNEX-TEST',
+    percent: 100,
+    active: true,
+  };
+  return cfg;
+}
+
+function normalizeProduct(key, raw = {}) {
+  const id = cleanText(raw.id || key || slugify(raw.name) || `produto-${Date.now()}`, 80);
+  return {
+    id,
+    name: cleanText(raw.name || key || 'Produto sem nome', 100),
+    category: cleanText(raw.category || 'Geral', 60),
+    price: Math.max(0, Number(raw.price || 0)),
+    imageUrl: cleanText(raw.imageUrl || raw.image || '', 500),
+    url: cleanText(raw.url || '', 500),
+    description: cleanText(raw.description || raw.info || '', 700),
+    tag: cleanText(raw.tag || 'IN STOCK', 40),
+    tone: cleanText(raw.tone || 'violet', 30),
+    code: cleanText(raw.code || String(id).slice(0, 4).toUpperCase(), 20),
+    active: raw.active !== false,
+  };
+}
+
+function publicCatalog(cfg) {
+  ensureStore(cfg);
+  const products = Object.entries(cfg.products)
+    .map(([key, product]) => normalizeProduct(key, product))
+    .filter(product => product.active);
+  return {
+    products,
+    categories: cfg.storeCategories,
+    settings: cfg.storeSettings,
+  };
+}
+
+function adminRoleMatches(member, cfg) {
+  const roleId = cfg.adminRoleId || process.env.ADMIN_ROLE_ID;
+  return Boolean(member && roleId && member.roles?.cache?.has(roleId));
+}
+
+function registerStoreCommands(slashCommands) {
+  slashCommands.push(
+    new SlashCommandBuilder()
+      .setName('produto-adicionar')
+      .setDescription('Adiciona um produto ao catálogo Rynex')
+      .addStringOption(option => option.setName('nome').setDescription('Nome do produto').setRequired(true))
+      .addNumberOption(option => option.setName('preco').setDescription('Preço em reais').setRequired(true).setMinValue(0))
+      .addStringOption(option => option.setName('categoria').setDescription('Categoria do produto').setRequired(true))
+      .addStringOption(option => option.setName('imagem').setDescription('URL da imagem').setRequired(false))
+      .addStringOption(option => option.setName('url').setDescription('URL pública do produto').setRequired(false))
+      .addStringOption(option => option.setName('descricao').setDescription('Descrição do produto').setRequired(false))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('produto-editar')
+      .setDescription('Edita um produto existente')
+      .addStringOption(option => option.setName('id').setDescription('ID do produto').setRequired(true))
+      .addStringOption(option => option.setName('nome').setDescription('Novo nome').setRequired(false))
+      .addNumberOption(option => option.setName('preco').setDescription('Novo preço').setRequired(false).setMinValue(0))
+      .addStringOption(option => option.setName('categoria').setDescription('Nova categoria').setRequired(false))
+      .addStringOption(option => option.setName('imagem').setDescription('Nova URL da imagem').setRequired(false))
+      .addStringOption(option => option.setName('url').setDescription('Nova URL pública').setRequired(false))
+      .addStringOption(option => option.setName('descricao').setDescription('Nova descrição').setRequired(false))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('produto-remover')
+      .setDescription('Remove um produto do catálogo')
+      .addStringOption(option => option.setName('id').setDescription('ID do produto').setRequired(true))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('produto-listar')
+      .setDescription('Lista os produtos do catálogo')
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('config-categorias')
+      .setDescription('Configura as categorias do site')
+      .addStringOption(option => option.setName('lista').setDescription('Categorias separadas por vírgula').setRequired(true))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('config-cupom')
+      .setDescription('Configura o cupom de teste do site')
+      .addStringOption(option => option.setName('codigo').setDescription('Código do cupom').setRequired(true))
+      .addNumberOption(option => option.setName('desconto').setDescription('Percentual de desconto, de 0 a 100').setRequired(true).setMinValue(0).setMaxValue(100))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('config-site')
+      .setDescription('Configura textos básicos do site')
+      .addStringOption(option => option.setName('marca').setDescription('Nome da marca').setRequired(false))
+      .addStringOption(option => option.setName('titulo').setDescription('Título principal').setRequired(false))
+      .addStringOption(option => option.setName('email').setDescription('E-mail de suporte').setRequired(false))
+      .addStringOption(option => option.setName('checkout').setDescription('Aviso no checkout').setRequired(false))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('pedido-aceitar')
+      .setDescription('Confirma manualmente um pedido e abre o canal privado')
+      .addStringOption(option => option.setName('id').setDescription('ID do pedido').setRequired(true))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('pedido-recusar')
+      .setDescription('Recusa um pedido pendente')
+      .addStringOption(option => option.setName('id').setDescription('ID do pedido').setRequired(true))
+      .setDMPermission(false)
+      .toJSON(),
+  );
+}
+
+function createStoreApi({ app, client, db, save, getGuild }) {
+  db.users ||= {};
+  db.sessions ||= {};
+  db.storeOrders ||= {};
+
+  const getStoreGuild = () => {
+    const preferred = process.env.DISCORD_GUILD_ID && client.guilds.cache.get(process.env.DISCORD_GUILD_ID);
+    return preferred || client.guilds.cache.first() || null;
+  };
+
+  const getStoreConfig = () => {
+    const guild = getStoreGuild();
+    return { guild, cfg: ensureStore(getGuild(guild?.id || process.env.DISCORD_GUILD_ID || 'demo')) };
+  };
+
+  const sessionUser = req => {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    const session = token && db.sessions[token];
+    return session?.userId ? db.users[session.userId] || null : null;
+  };
+
+  const isAdminApi = req => {
+    const key = process.env.ADMIN_PANEL_KEY;
+    return Boolean(key && req.headers.authorization === `Bearer ${key}`);
+  };
+
+  const sendJsonError = (res, status, error, message) => res.status(status).json({ error, message });
+
+  const publicUser = user => ({ id: user.id, name: user.name, username: user.username, email: user.email });
+
+  const findOrder = id => db.storeOrders[String(id)] || null;
+  const findOrderByChannel = channelId => Object.values(db.storeOrders).find(order => order.discordChannelId === channelId) || null;
+
+  const authorizedOrder = (req, order) => {
+    const user = sessionUser(req);
+    if (isAdminApi(req)) return { user, admin: true };
+    if (!user || !order || order.userId !== user.id) return null;
+    return { user, admin: false };
+  };
+
+  const appendMessage = (order, message) => {
+    order.messages ||= [];
+    order.messages.push({
+      id: message.id || crypto.randomUUID(),
+      source: message.source || 'site',
+      authorId: message.authorId || null,
+      authorName: cleanText(message.authorName || 'Cliente', 80),
+      content: redact(message.content),
+      at: message.at || new Date().toISOString(),
+    });
+    order.messages = order.messages.slice(-300);
+    order.updatedAt = new Date().toISOString();
+    save();
+  };
+
+  const createDiscordOrderChannel = async order => {
+    if (!client.user) return null;
+    const guild = getStoreGuild();
+    if (!guild) return null;
+    const cfg = getGuild(guild.id);
+    ensureStore(cfg);
+    const parentId = cfg.orderCategoryId || cfg.ticketCategoryId || process.env.ORDER_CATEGORY_ID || '';
+    const adminRoleId = cfg.adminRoleId || process.env.ADMIN_ROLE_ID || '';
+    const permissionOverwrites = [
+      { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+      {
+        id: client.user.id,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageChannels],
+      },
+    ];
+    if (adminRoleId) {
+      permissionOverwrites.push({
+        id: adminRoleId,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+      });
+    }
+    if (/^\d{15,22}$/.test(String(order.discordUserId || ''))) {
+      permissionOverwrites.push({
+        id: order.discordUserId,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+      });
+    }
+    const baseName = slugify((order.items || []).map(item => item.name).join('-')) || 'pedido';
+    const channel = await guild.channels.create({
+      name: `pedido-${baseName}-${String(order.id).slice(-6)}`.slice(0, 95),
+      type: ChannelType.GuildText,
+      parent: parentId || undefined,
+      permissionOverwrites,
+      reason: `Pedido Rynex ${order.id}`,
+    });
+    order.discordGuildId = guild.id;
+    order.discordChannelId = channel.id;
+    order.status = 'awaiting_delivery';
+    order.channelCreatedAt = new Date().toISOString();
+    save();
+    const lines = (order.items || []).map(item => `• ${item.quantity}× ${item.name} — R$ ${Number(item.price).toFixed(2)}`).join('\n');
+    const mention = order.discordUserId ? `<@${order.discordUserId}>` : 'cliente pelo site';
+    await channel.send({
+      content: adminRoleId ? `<@&${adminRoleId}> novo pedido recebido` : 'Novo pedido recebido',
+      embeds: [new EmbedBuilder()
+        .setColor(order.total === 0 ? 0x22c55e : 0x8b5cf6)
+        .setTitle(`🧾 Pedido ${order.id}`)
+        .setDescription(`Cliente: **${cleanText(order.customerName, 100)}** (${cleanText(order.customerEmail, 140)})\nContato Discord: ${mention}\n\n${lines || 'Sem itens'}\n\n**Total: R$ ${Number(order.total).toFixed(2)}**\nStatus: **${order.status}**`)
+        .setFooter({ text: 'Rynex Store • entrega manual' })
+        .setTimestamp()],
+      allowedMentions: { roles: adminRoleId ? [adminRoleId] : [], users: order.discordUserId ? [order.discordUserId] : [] },
+    });
+    return channel;
+  };
+
+  const confirmOrder = async (orderId, reviewer = null) => {
+    const order = findOrder(orderId);
+    if (!order) return { error: 'order_not_found' };
+    order.paymentStatus = 'approved';
+    order.status = 'paid';
+    order.paidAt = new Date().toISOString();
+    order.reviewedBy = reviewer?.id || reviewer || null;
+    save();
+    if (!order.discordChannelId) await createDiscordOrderChannel(order).catch(error => console.error('Canal do pedido:', error.message));
+    save();
+    return order;
+  };
+
+  const rejectOrder = orderId => {
+    const order = findOrder(orderId);
+    if (!order) return null;
+    order.paymentStatus = 'rejected';
+    order.status = 'payment_rejected';
+    order.updatedAt = new Date().toISOString();
+    save();
+    return order;
+  };
+
+  const syncPendingChannels = async () => {
+    for (const order of Object.values(db.storeOrders)) {
+      if (order.status === 'paid' && !order.discordChannelId) {
+        await createDiscordOrderChannel(order).catch(error => console.error(`Canal pendente ${order.id}:`, error.message));
+      }
+    }
+    save();
+  };
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    next();
+  });
+
+  app.get('/api/store/health', (_, res) => res.json({ ok: true, bot: client.user?.tag || null }));
+
+  app.get('/api/store/catalog', (req, res) => {
+    return res.json(publicCatalog(getStoreConfig().cfg));
+  });
+
+  app.post('/api/auth/register', (req, res) => {
+    const name = cleanText(req.body?.name, 100);
+    const username = cleanText(req.body?.username, 40).toLowerCase();
+    const email = cleanText(req.body?.email, 160).toLowerCase();
+    const password = String(req.body?.password || '');
+    if (name.length < 2 || username.length < 3 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
+      return sendJsonError(res, 400, 'invalid_input', 'Informe nome, usuário, e-mail válido e senha com pelo menos 8 caracteres.');
+    }
+    if (Object.values(db.users).some(user => user.email === email || user.username === username)) {
+      return sendJsonError(res, 409, 'user_exists', 'Já existe uma conta com este e-mail ou nome de usuário.');
+    }
+    const id = crypto.randomUUID();
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    db.users[id] = { id, name, username, email, salt, passwordHash, createdAt: new Date().toISOString() };
+    const token = crypto.randomBytes(32).toString('hex');
+    db.sessions[token] = { userId: id, createdAt: new Date().toISOString() };
+    save();
+    return res.status(201).json({ token, user: publicUser(db.users[id]) });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    const email = cleanText(req.body?.email, 160).toLowerCase();
+    const password = String(req.body?.password || '');
+    const user = Object.values(db.users).find(entry => entry.email === email);
+    if (!user) return sendJsonError(res, 401, 'invalid_credentials', 'E-mail ou senha inválidos.');
+    const hash = crypto.scryptSync(password, user.salt, 64).toString('hex');
+    if (!crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(user.passwordHash, 'hex'))) {
+      return sendJsonError(res, 401, 'invalid_credentials', 'E-mail ou senha inválidos.');
+    }
+    const token = crypto.randomBytes(32).toString('hex');
+    db.sessions[token] = { userId: user.id, createdAt: new Date().toISOString() };
+    save();
+    return res.json({ token, user: publicUser(user) });
+  });
+
+  app.get('/api/auth/me', (req, res) => {
+    const user = sessionUser(req);
+    if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para continuar.');
+    return res.json({ user: publicUser(user) });
+  });
+
+  app.post('/api/store/orders', async (req, res) => {
+    const user = sessionUser(req);
+    if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para criar um pedido.');
+    const { cfg } = getStoreConfig();
+    const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items = requestedItems.map(item => {
+      const product = normalizeProduct(item.id, cfg.products[item.id] || item);
+      return { id: product.id, name: product.name, price: product.price, quantity: Math.max(1, Math.min(20, Number(item.quantity || 1))) };
+    }).filter(item => item.name && item.price >= 0);
+    if (!items.length) return sendJsonError(res, 400, 'empty_order', 'O carrinho está vazio.');
+    const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const couponCode = cleanText(req.body?.coupon, 80).toUpperCase();
+    const coupon = cfg.storeCoupon?.active && couponCode && couponCode === String(cfg.storeCoupon.code || '').toUpperCase() ? cfg.storeCoupon : null;
+    const discount = coupon ? Math.min(100, Math.max(0, Number(coupon.percent || 0))) : 0;
+    const total = Math.round(subtotal * (1 - discount / 100) * 100) / 100;
+    const order = {
+      id: `RX-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+      userId: user.id,
+      customerName: user.name,
+      customerEmail: user.email,
+      discordUserId: cleanText(req.body?.discordUserId, 30),
+      items,
+      subtotal,
+      discountPercent: discount,
+      couponCode: coupon ? coupon.code : null,
+      total,
+      status: total === 0 ? 'paid' : 'awaiting_payment',
+      paymentStatus: total === 0 ? 'approved_by_coupon' : 'awaiting_pix',
+      paymentMethod: 'manual_pix',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    };
+    db.storeOrders[order.id] = order;
+    save();
+    if (total === 0) await createDiscordOrderChannel(order).catch(error => console.error('Canal do pedido:', error.message));
+    const payment = total > 0 ? {
+      mode: 'manual_pix',
+      pixKey: process.env.PIX_KEY || null,
+      instructions: process.env.PIX_KEY ? 'Faça o Pix e envie o comprovante no atendimento. A equipe fará a confirmação manual.' : 'A chave Pix ainda não foi configurada pelo administrador.',
+    } : null;
+    return res.status(201).json({ order, payment });
+  });
+
+  app.get('/api/store/orders/:id', (req, res) => {
+    const order = findOrder(req.params.id);
+    if (!authorizedOrder(req, order)) return sendJsonError(res, 403, 'forbidden', 'Você não tem acesso a este pedido.');
+    return res.json({ order });
+  });
+
+  app.get('/api/store/orders/:id/messages', (req, res) => {
+    const order = findOrder(req.params.id);
+    if (!authorizedOrder(req, order)) return sendJsonError(res, 403, 'forbidden', 'Você não tem acesso a este pedido.');
+    return res.json({ messages: order.messages || [] });
+  });
+
+  app.post('/api/store/orders/:id/messages', async (req, res) => {
+    const order = findOrder(req.params.id);
+    const access = authorizedOrder(req, order);
+    if (!access) return sendJsonError(res, 403, 'forbidden', 'Você não tem acesso a este pedido.');
+    const content = redact(req.body?.content);
+    if (!content) return sendJsonError(res, 400, 'empty_message', 'Escreva uma mensagem.');
+    const message = { source: 'site', authorId: access.user?.id || null, authorName: access.user?.name || 'Equipe', content };
+    appendMessage(order, message);
+    if (order.discordChannelId) {
+      const channel = await client.channels.fetch(order.discordChannelId).catch(() => null);
+      if (channel?.isTextBased()) await channel.send({ content: `**${message.authorName} (site):** ${content}`, allowedMentions: { parse: [] } }).catch(() => {});
+    }
+    return res.status(201).json({ message: order.messages.at(-1) });
+  });
+
+  async function handleInteraction(interaction, cfg) {
+    const command = interaction.commandName;
+    if (!COMMAND_NAMES.has(command)) return false;
+    ensureStore(cfg);
+    if (!adminRoleMatches(interaction.member, cfg)) {
+      await interaction.reply({ content: 'Somente o cargo administrador configurado pode usar os comandos da loja.', ephemeral: true });
+      return true;
+    }
+    if (command === 'produto-adicionar') {
+      const name = interaction.options.getString('nome', true);
+      const id = slugify(name) || `produto-${Date.now()}`;
+      const uniqueId = cfg.products[id] ? `${id}-${Date.now().toString().slice(-4)}` : id;
+      cfg.products[uniqueId] = normalizeProduct(uniqueId, {
+        id: uniqueId,
+        name,
+        price: interaction.options.getNumber('preco', true),
+        category: interaction.options.getString('categoria', true),
+        imageUrl: interaction.options.getString('imagem') || '',
+        url: interaction.options.getString('url') || '',
+        description: interaction.options.getString('descricao') || '',
+      });
+      save();
+      await interaction.reply({ content: `✅ Produto **${cfg.products[uniqueId].name}** adicionado com ID \`${uniqueId}\`.`, ephemeral: true });
+      return true;
+    }
+    if (command === 'produto-editar') {
+      const id = interaction.options.getString('id', true);
+      if (!cfg.products[id]) {
+        await interaction.reply({ content: `Não encontrei o produto \`${id}\`. Use /produto-listar.`, ephemeral: true });
+        return true;
+      }
+      const current = normalizeProduct(id, cfg.products[id]);
+      const values = {
+        name: interaction.options.getString('nome'),
+        price: interaction.options.getNumber('preco'),
+        category: interaction.options.getString('categoria'),
+        imageUrl: interaction.options.getString('imagem'),
+        url: interaction.options.getString('url'),
+        description: interaction.options.getString('descricao'),
+      };
+      Object.keys(values).forEach(key => { if (values[key] !== null) current[key] = values[key]; });
+      cfg.products[id] = current;
+      save();
+      await interaction.reply({ content: `✅ Produto \`${id}\` atualizado.`, ephemeral: true });
+      return true;
+    }
+    if (command === 'produto-remover') {
+      const id = interaction.options.getString('id', true);
+      if (!cfg.products[id]) {
+        await interaction.reply({ content: `Não encontrei o produto \`${id}\`.`, ephemeral: true });
+        return true;
+      }
+      delete cfg.products[id];
+      save();
+      await interaction.reply({ content: `✅ Produto \`${id}\` removido do catálogo.`, ephemeral: true });
+      return true;
+    }
+    if (command === 'produto-listar') {
+      const list = Object.entries(cfg.products).map(([id, value]) => {
+        const product = normalizeProduct(id, value);
+        return `• \`${id}\` — ${product.name} — R$ ${product.price.toFixed(2)} — ${product.category} — ${product.active ? 'ativo' : 'oculto'}`;
+      });
+      await interaction.reply({ content: list.length ? `**Catálogo Rynex**\n${list.join('\n').slice(0, 1850)}` : 'O catálogo ainda está vazio.', ephemeral: true });
+      return true;
+    }
+    if (command === 'config-categorias') {
+      const categories = interaction.options.getString('lista', true).split(',').map(value => cleanText(value, 50)).filter(Boolean).slice(0, 20);
+      cfg.storeCategories = [...new Set(categories)];
+      save();
+      await interaction.reply({ content: `✅ Categorias salvas: ${cfg.storeCategories.join(', ')}`, ephemeral: true });
+      return true;
+    }
+    if (command === 'config-cupom') {
+      cfg.storeCoupon = { code: cleanText(interaction.options.getString('codigo', true), 80).toUpperCase(), percent: interaction.options.getNumber('desconto', true), active: true };
+      save();
+      await interaction.reply({ content: `✅ Cupom \`${cfg.storeCoupon.code}\` configurado com ${cfg.storeCoupon.percent}% de desconto.`, ephemeral: true });
+      return true;
+    }
+    if (command === 'config-site') {
+      const settings = cfg.storeSettings;
+      const values = { brandName: interaction.options.getString('marca'), heroTitle: interaction.options.getString('titulo'), supportEmail: interaction.options.getString('email'), checkoutNote: interaction.options.getString('checkout') };
+      Object.keys(values).forEach(key => { if (values[key] !== null) settings[key] = cleanText(values[key], 300); });
+      save();
+      await interaction.reply({ content: '✅ Configuração do site atualizada. O catálogo público lê esses dados pela API.', ephemeral: true });
+      return true;
+    }
+    if (command === 'pedido-aceitar') {
+      const order = await confirmOrder(interaction.options.getString('id', true), interaction.user);
+      await interaction.reply({ content: order.error ? 'Pedido não encontrado.' : `✅ Pedido **${order.id}** confirmado. ${order.discordChannelId ? `Canal: <#${order.discordChannelId}>` : 'O canal será criado quando o bot estiver conectado a um servidor.'}`, ephemeral: true });
+      return true;
+    }
+    if (command === 'pedido-recusar') {
+      const order = rejectOrder(interaction.options.getString('id', true));
+      await interaction.reply({ content: order ? `Pedido **${order.id}** recusado.` : 'Pedido não encontrado.', ephemeral: true });
+      return true;
+    }
+    return true;
+  }
+
+  const captureDiscordMessage = (message, order) => {
+    if (!order || !message.content?.trim()) return;
+    appendMessage(order, {
+      id: message.id,
+      source: 'discord',
+      authorId: message.author.id,
+      authorName: message.member?.displayName || message.author.username,
+      content: message.content,
+      at: new Date(message.createdTimestamp || Date.now()).toISOString(),
+    });
+  };
+
+  return {
+    handleInteraction,
+    captureDiscordMessage,
+    findOrderByChannel,
+    confirmOrder,
+    rejectOrder,
+    syncPendingChannels,
+    ensureStore,
+  };
+}
+
+module.exports = { createStoreApi, registerStoreCommands, ensureStore, publicCatalog };

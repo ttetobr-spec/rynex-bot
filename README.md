@@ -36,6 +36,14 @@ Os tickets agora exibem controles de staff para assumir, notificar, fechar, adic
 
 O painel ADM concentra as funções administrativas em botões privados: **Relatório por ID**, **Ver logs**, **Enviar DM** e **Enviar no canal**. O relatório consulta apenas dados que o bot registrou no servidor, como mensagens observadas e tickets do usuário informado; ele não acessa DMs privadas. As mensagens enviadas pelo painel ficam sem menções automáticas e as ações são registradas no histórico administrativo.
 
+## Loja, produtos, cupom e pedidos
+
+O painel mostra o botão **Loja, pedidos e cupom** com os comandos rápidos. O cargo administrativo pode usar `/produto-adicionar`, `/produto-editar`, `/produto-remover` e `/produto-listar`. Cada produto aceita nome, preço, categoria, imagem, URL e descrição. `/config-categorias` e `/config-site` atualizam as informações lidas pelo storefront.
+
+`/config-cupom codigo:RYNEX-TEST desconto:100` cria o cupom de teste que zera o pedido. Quando o checkout usa esse cupom, o pedido é considerado pago e o bot tenta criar um canal privado `pedido-...` para a entrega manual. Pedidos com valor maior que zero ficam aguardando Pix e podem ser confirmados pela equipe com `/pedido-aceitar id:RX-...`; `/pedido-recusar` registra a recusa.
+
+O servidor HTTP expõe o catálogo em `/api/store/catalog`, contas em `/api/auth/register` e `/api/auth/login`, pedidos em `/api/store/orders` e mensagens em `/api/store/orders/:id/messages`. O site usa o mesmo endpoint em desenvolvimento; em produção, publique a API com HTTPS e mantenha os segredos no ambiente do host.
+
 ## Variáveis de ambiente
 
 Copie `.env.example` para `.env` e preencha:
@@ -46,9 +54,15 @@ POLLINATIONS_API_KEY=chave_do_pollinations
 POLLINATIONS_MODEL=openai/gpt-oss-20b
 ADMIN_ROLE_ID=1533477047144419612
 ADMIN_PANEL_KEY=chave_forte_do_painel
+BOT_INTERNAL_KEY=chave_interna_opcional_para_integracoes
+PIX_KEY=chave_pix_real
+DISCORD_GUILD_ID=id_do_servidor_principal
+ORDER_CATEGORY_ID=opcional_id_da_categoria_de_pedidos
+TEST_COUPON_CODE=RYNEX-TEST
 TICKET_CATEGORY_ID=opcional_id_da_categoria_de_tickets
 TICKET_LOG_CHANNEL_ID=opcional_id_do_canal_de_logs
 PORT=3000
+DATA_DIR=./data
 ```
 
 Os valores de token e chave devem permanecer somente no `.env` local ou nos segredos do host. Nunca publique `.env` no GitHub.
