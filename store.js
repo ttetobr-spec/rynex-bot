@@ -8,6 +8,16 @@ const {
 } = require('discord.js');
 
 const DEFAULT_CATEGORIES = ['Techwear', 'Essentials', 'Footwear', 'Accessories'];
+const DEFAULT_PRODUCTS = [
+  { id: '1', name: 'Void Runner', category: 'Techwear', price: 289.9, tag: 'NEW DROP', tone: 'violet', code: '01', visual: 'jacket', description: 'Uma camada utilitária para atravessar o ruído. Corte arquitetônico, presença silenciosa e detalhes que respondem ao seu movimento.' },
+  { id: '2', name: 'Neon Core', category: 'Essentials', price: 149.9, tag: 'BEST SELLER', tone: 'cyan', code: '02', visual: 'hoodie', description: 'O essencial, mas nunca óbvio. Uma base confortável com a energia visual da próxima frequência.' },
+  { id: '3', name: 'Rift 01', category: 'Footwear', price: 399.9, tag: 'LIMITED', tone: 'orange', code: '03', visual: 'shoe', description: 'Um tênis projetado para mudar de direção. Volume expressivo, sola responsiva e acabamento de edição limitada.' },
+  { id: '4', name: 'Signal Pack', category: 'Accessories', price: 119.9, tag: 'IN STOCK', tone: 'pink', code: '04', visual: 'bag', description: 'Tudo o que você precisa, em uma frequência compacta. Compartimentos inteligentes e identidade forte.' },
+  { id: '5', name: 'Ghost Layer', category: 'Techwear', price: 239.9, tag: 'NEW DROP', tone: 'lime', code: '05', visual: 'jacket', description: 'Leve, modular e pronto para a cidade. Ghost Layer foi pensado para camadas e possibilidades.' },
+  { id: '6', name: 'Pulse Tee', category: 'Essentials', price: 89.9, tag: 'IN STOCK', tone: 'blue', code: '06', visual: 'tee', description: 'Uma camiseta limpa com um pulso próprio. O primeiro sinal de qualquer look.' },
+  { id: '7', name: 'Arc Shell', category: 'Techwear', price: 329.9, tag: 'LIMITED', tone: 'purple', code: '07', visual: 'jacket', description: 'Proteção com geometria. Arc Shell entrega uma silhueta precisa para dias em alta velocidade.' },
+  { id: '8', name: 'Mono Utility', category: 'Accessories', price: 159.9, tag: 'NEW DROP', tone: 'yellow', code: '08', visual: 'bag', description: 'Acessório essencial para quem carrega apenas o que importa — e faz isso com estilo.' },
+];
 const COMMAND_NAMES = new Set([
   'produto-adicionar',
   'produto-editar',
@@ -16,6 +26,7 @@ const COMMAND_NAMES = new Set([
   'config-categorias',
   'config-cupom',
   'config-site',
+  'config-categoria-pedidos',
   'pedido-aceitar',
   'pedido-recusar',
 ]);
@@ -43,6 +54,7 @@ function redact(value) {
 
 function ensureStore(cfg) {
   cfg.products ||= {};
+  if (!Object.keys(cfg.products).length) cfg.products = Object.fromEntries(DEFAULT_PRODUCTS.map(product => [product.id, { ...product }]));
   cfg.storeCategories ||= [...DEFAULT_CATEGORIES];
   cfg.storeSettings ||= {
     brandName: 'Rynex',
@@ -70,6 +82,7 @@ function normalizeProduct(key, raw = {}) {
     description: cleanText(raw.description || raw.info || '', 700),
     tag: cleanText(raw.tag || 'IN STOCK', 40),
     tone: cleanText(raw.tone || 'violet', 30),
+    visual: cleanText(raw.visual || 'tee', 30),
     code: cleanText(raw.code || String(id).slice(0, 4).toUpperCase(), 20),
     active: raw.active !== false,
   };
@@ -139,6 +152,7 @@ function registerStoreCommands(slashCommands) {
       .setDescription('Configura o cupom de teste do site')
       .addStringOption(option => option.setName('codigo').setDescription('Código do cupom').setRequired(true))
       .addNumberOption(option => option.setName('desconto').setDescription('Percentual de desconto, de 0 a 100').setRequired(true).setMinValue(0).setMaxValue(100))
+      .addBooleanOption(option => option.setName('ativo').setDescription('Ativar ou desativar o cupom').setRequired(false))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -148,6 +162,12 @@ function registerStoreCommands(slashCommands) {
       .addStringOption(option => option.setName('titulo').setDescription('Título principal').setRequired(false))
       .addStringOption(option => option.setName('email').setDescription('E-mail de suporte').setRequired(false))
       .addStringOption(option => option.setName('checkout').setDescription('Aviso no checkout').setRequired(false))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('config-categoria-pedidos')
+      .setDescription('Define a categoria do Discord que recebe os canais privados de pedidos')
+      .addChannelOption(option => option.setName('categoria').setDescription('Categoria de canais do servidor').addChannelTypes(ChannelType.GuildCategory).setRequired(true))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -183,6 +203,11 @@ function createStoreApi({ app, client, db, save, getGuild }) {
   const sessionUser = req => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
     const session = token && db.sessions[token];
+    if (session?.createdAt && Date.now() - new Date(session.createdAt).getTime() > 30 * 24 * 60 * 60 * 1000) {
+      delete db.sessions[token];
+      save();
+      return null;
+    }
     return session?.userId ? db.users[session.userId] || null : null;
   };
 
@@ -192,6 +217,16 @@ function createStoreApi({ app, client, db, save, getGuild }) {
   };
 
   const sendJsonError = (res, status, error, message) => res.status(status).json({ error, message });
+  const authAttempts = new Map();
+  const limitAuthAttempts = (req, res, next) => {
+    const key = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const recent = (authAttempts.get(key) || []).filter(time => now - time < 60_000);
+    if (recent.length >= 20) return sendJsonError(res, 429, 'rate_limited', 'Muitas tentativas. Aguarde um minuto e tente novamente.');
+    recent.push(now);
+    authAttempts.set(key, recent);
+    next();
+  };
 
   const publicUser = user => ({ id: user.id, name: user.name, username: user.username, email: user.email });
 
@@ -308,11 +343,16 @@ function createStoreApi({ app, client, db, save, getGuild }) {
   };
 
   app.use((req, res, next) => {
-    const origin = req.headers.origin || '*';
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
+    const origin = req.headers.origin;
+    const allowedOrigins = new Set(String(process.env.ALLOWED_SITE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean));
+    if (!origin) res.setHeader('Access-Control-Allow-Origin', '*');
+    else if (allowedOrigins.has(origin) || process.env.CORS_ALLOW_ALL === 'true') {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    if (req.method === 'OPTIONS' && origin && !allowedOrigins.has(origin) && process.env.CORS_ALLOW_ALL !== 'true') return res.status(403).end();
     if (req.method === 'OPTIONS') return res.status(204).end();
     next();
   });
@@ -323,7 +363,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     return res.json(publicCatalog(getStoreConfig().cfg));
   });
 
-  app.post('/api/auth/register', (req, res) => {
+  app.post('/api/auth/register', limitAuthAttempts, (req, res) => {
     const name = cleanText(req.body?.name, 100);
     const username = cleanText(req.body?.username, 40).toLowerCase();
     const email = cleanText(req.body?.email, 160).toLowerCase();
@@ -344,7 +384,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     return res.status(201).json({ token, user: publicUser(db.users[id]) });
   });
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', limitAuthAttempts, (req, res) => {
     const email = cleanText(req.body?.email, 160).toLowerCase();
     const password = String(req.body?.password || '');
     const user = Object.values(db.users).find(entry => entry.email === email);
@@ -369,11 +409,17 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     const user = sessionUser(req);
     if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para criar um pedido.');
     const { cfg } = getStoreConfig();
-    const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
-    const items = requestedItems.map(item => {
-      const product = normalizeProduct(item.id, cfg.products[item.id] || item);
-      return { id: product.id, name: product.name, price: product.price, quantity: Math.max(1, Math.min(20, Number(item.quantity || 1))) };
-    }).filter(item => item.name && item.price >= 0);
+    const requestedItems = Array.isArray(req.body?.items) ? req.body.items.slice(0, 30) : [];
+    const items = [];
+    for (const requested of requestedItems) {
+      const key = String(requested?.id ?? '');
+      const rawProduct = cfg.products[key];
+      if (!rawProduct || rawProduct.active === false) return sendJsonError(res, 400, 'invalid_product', 'Um produto do carrinho não está mais disponível. Atualize a página.');
+      const product = normalizeProduct(key, rawProduct);
+      const quantity = Math.floor(Number(requested.quantity || 1));
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) return sendJsonError(res, 400, 'invalid_quantity', 'Quantidade de produto inválida.');
+      items.push({ id: product.id, name: product.name, price: product.price, quantity });
+    }
     if (!items.length) return sendJsonError(res, 400, 'empty_order', 'O carrinho está vazio.');
     const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
     const couponCode = cleanText(req.body?.coupon, 80).toUpperCase();
@@ -509,9 +555,9 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       return true;
     }
     if (command === 'config-cupom') {
-      cfg.storeCoupon = { code: cleanText(interaction.options.getString('codigo', true), 80).toUpperCase(), percent: interaction.options.getNumber('desconto', true), active: true };
+      cfg.storeCoupon = { code: cleanText(interaction.options.getString('codigo', true), 80).toUpperCase(), percent: interaction.options.getNumber('desconto', true), active: interaction.options.getBoolean('ativo') ?? true };
       save();
-      await interaction.reply({ content: `✅ Cupom \`${cfg.storeCoupon.code}\` configurado com ${cfg.storeCoupon.percent}% de desconto.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Cupom \`${cfg.storeCoupon.code}\`: ${cfg.storeCoupon.active ? `${cfg.storeCoupon.percent}% de desconto, ativo` : 'desativado'}.`, ephemeral: true });
       return true;
     }
     if (command === 'config-site') {
@@ -520,6 +566,13 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       Object.keys(values).forEach(key => { if (values[key] !== null) settings[key] = cleanText(values[key], 300); });
       save();
       await interaction.reply({ content: '✅ Configuração do site atualizada. O catálogo público lê esses dados pela API.', ephemeral: true });
+      return true;
+    }
+    if (command === 'config-categoria-pedidos') {
+      const category = interaction.options.getChannel('categoria', true);
+      cfg.orderCategoryId = category.id;
+      save();
+      await interaction.reply({ content: `✅ Os canais de pedido serão criados em **${category.name}**.`, ephemeral: true });
       return true;
     }
     if (command === 'pedido-aceitar') {

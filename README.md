@@ -38,11 +38,11 @@ O painel ADM concentra as funções administrativas em botões privados: **Relat
 
 ## Loja, produtos, cupom e pedidos
 
-O painel mostra o botão **Loja, pedidos e cupom** com os comandos rápidos. O cargo administrativo pode usar `/produto-adicionar`, `/produto-editar`, `/produto-remover` e `/produto-listar`. Cada produto aceita nome, preço, categoria, imagem, URL e descrição. `/config-categorias` e `/config-site` atualizam as informações lidas pelo storefront.
+O painel mostra o botão **Loja, pedidos e cupom** com os comandos rápidos. O cargo administrativo pode usar `/produto-adicionar`, `/produto-editar`, `/produto-remover` e `/produto-listar`. Cada produto aceita nome, preço, categoria, imagem, URL e descrição. `/config-categorias`, `/config-site` e `/config-categoria-pedidos` ajustam o catálogo, os textos públicos e a categoria Discord dos canais privados.
 
-`/config-cupom codigo:RYNEX-TEST desconto:100` cria o cupom de teste que zera o pedido. Quando o checkout usa esse cupom, o pedido é considerado pago e o bot tenta criar um canal privado `pedido-...` para a entrega manual. Pedidos com valor maior que zero ficam aguardando Pix e podem ser confirmados pela equipe com `/pedido-aceitar id:RX-...`; `/pedido-recusar` registra a recusa.
+`RYNEX-TEST` vem habilitado com 100% de desconto para teste. Para desligá-lo antes da operação real, use `/config-cupom codigo:RYNEX-TEST desconto:100 ativo:false`. Quando o checkout usa o cupom, o pedido fica pago e o bot tenta abrir um canal privado `pedido-...`. Pedidos com valor maior que zero exibem a chave Pix configurada em `PIX_KEY`, aguardam confirmação humana via `/pedido-aceitar id:RX-...` e podem ser recusados com `/pedido-recusar`.
 
-O servidor HTTP expõe o catálogo em `/api/store/catalog`, contas em `/api/auth/register` e `/api/auth/login`, pedidos em `/api/store/orders` e mensagens em `/api/store/orders/:id/messages`. O site usa o mesmo endpoint em desenvolvimento; em produção, publique a API com HTTPS e mantenha os segredos no ambiente do host.
+O servidor HTTP expõe o catálogo, cadastro/login, pedidos e mensagens do atendimento. No site, o carrinho após a compra mostra o pedido e atualiza o chat automaticamente; as mensagens da equipe no canal Discord aparecem ali também. O backend calcula preços a partir do próprio catálogo e ignora valores enviados pelo navegador. Em produção, hospede o bot/API com HTTPS, defina `ALLOWED_SITE_ORIGINS` e compile o site com `VITE_RYNEX_API_URL` apontando para essa API. O pagamento desta etapa é Pix manual: a equipe confere o comprovante e confirma no Discord; nenhum gateway automático está conectado.
 
 ## Variáveis de ambiente
 
@@ -55,6 +55,7 @@ POLLINATIONS_MODEL=openai/gpt-oss-20b
 ADMIN_ROLE_ID=1533477047144419612
 ADMIN_PANEL_KEY=chave_forte_do_painel
 BOT_INTERNAL_KEY=chave_interna_opcional_para_integracoes
+ALLOWED_SITE_ORIGINS=https://seu-dominio.example
 PIX_KEY=chave_pix_real
 DISCORD_GUILD_ID=id_do_servidor_principal
 ORDER_CATEGORY_ID=opcional_id_da_categoria_de_pedidos
@@ -65,7 +66,7 @@ PORT=3000
 DATA_DIR=./data
 ```
 
-Os valores de token e chave devem permanecer somente no `.env` local ou nos segredos do host. Nunca publique `.env` no GitHub.
+Os valores de token e chave devem permanecer somente no `.env` local ou nos segredos do host. Nunca publique `.env` no GitHub nem envie o token do bot em mensagem. O canal só é criado no Discord depois que `DISCORD_TOKEN` estiver configurado e o bot estiver online.
 
 ## Executar no Windows
 
