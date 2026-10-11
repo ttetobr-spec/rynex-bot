@@ -38,11 +38,11 @@ O painel ADM concentra as funções administrativas em botões privados: **Relat
 
 ## Loja, produtos, cupom e pedidos
 
-O painel mostra o botão **Loja, pedidos e cupom** com os comandos rápidos. O cargo administrativo pode usar `/produto-adicionar`, `/produto-editar`, `/produto-remover` e `/produto-listar`. Cada produto aceita nome, preço, categoria, imagem, URL e descrição. `/config-categorias`, `/config-site` e `/config-categoria-pedidos` ajustam o catálogo, os textos públicos e a categoria Discord dos canais privados. `/config-pix` permite configurar ou consultar a chave em resposta privada; a chave personalizada fica no armazenamento de dados do bot, não no GitHub.
+O painel mostra o botão **Loja, pedidos e cupom** com os comandos rápidos. O cargo administrativo pode usar `/produto-adicionar`, `/produto-editar`, `/produto-remover` e `/produto-listar`. Cada produto aceita nome, preço, categoria, imagem, URL e descrição. `/config-categorias`, `/config-site` e `/config-categoria-pedidos` ajustam o catálogo, os textos públicos e a categoria Discord dos canais privados. `/config-pix chave:... cidade:...` guarda a chave e a cidade em resposta privada; a chave fica no armazenamento do bot, não no GitHub. Configure a marca pelo comando `/config-site marca:...`.
 
-`RYNEX-TEST` vem habilitado com 100% de desconto para teste. Para desligá-lo antes da operação real, use `/config-cupom codigo:RYNEX-TEST desconto:100 ativo:false`. Quando o checkout usa o cupom, o pedido fica pago e o bot tenta abrir um canal privado `pedido-...`. Pedidos com valor maior que zero exibem a chave Pix configurada em `/config-pix` ou, como fallback, em `PIX_KEY`, aguardam confirmação humana via `/pedido-aceitar id:RX-...` e podem ser recusados com `/pedido-recusar`.
+`RYNEX-TEST` vem habilitado com 100% de desconto para teste. Para desligá-lo antes da operação real, use `/config-cupom codigo:RYNEX-TEST desconto:100 ativo:false`. Quando o checkout usa o cupom, o pedido fica pago e o bot tenta abrir um canal privado `pedido-...`. Pedidos pagos em Pix exibem no site um QR estático e o código copia-e-cola. `/gerarpix valor:10 nome:usuario` gera um QR e o código para compartilhar. Como o QR é estático, o bot não recebe uma confirmação automática do banco: um administrador usa `/pedido-pendentes` para ver os IDs, confere o recebimento no banco e então executa `/pedido-aceitar id:RX-...` para confirmar o pedido e abrir o canal privado. Pedidos podem ser recusados com `/pedido-recusar`.
 
-O servidor HTTP expõe o catálogo, cadastro/login, pedidos e mensagens do atendimento. No site, o carrinho após a compra mostra o pedido e atualiza o chat automaticamente; as mensagens da equipe no canal Discord aparecem ali também. O backend calcula preços a partir do próprio catálogo e ignora valores enviados pelo navegador. Em produção, hospede o bot/API com HTTPS, defina `ALLOWED_SITE_ORIGINS` e compile o site com `VITE_RYNEX_API_URL` apontando para essa API. O pagamento desta etapa é Pix manual: a equipe confere o comprovante e confirma no Discord; nenhum gateway automático está conectado.
+O servidor HTTP expõe o catálogo, cadastro/login, pedidos e mensagens do atendimento. No site, o carrinho após a compra mostra o pedido, o QR Pix e o copia-e-cola; o chat atualiza automaticamente e as mensagens da equipe no canal Discord aparecem ali também. O backend calcula preços a partir do próprio catálogo e ignora valores enviados pelo navegador. Em produção, hospede o bot/API com HTTPS, defina `ALLOWED_SITE_ORIGINS` e compile o site com `VITE_RYNEX_API_URL` apontando para essa API. O Pix desta etapa é estático e confirmado manualmente; não há confirmação automática via banco.
 
 ## Variáveis de ambiente
 
@@ -57,6 +57,8 @@ ADMIN_PANEL_KEY=chave_forte_do_painel
 BOT_INTERNAL_KEY=chave_interna_opcional_para_integracoes
 ALLOWED_SITE_ORIGINS=https://seu-dominio.example
 PIX_KEY=chave_pix_real
+PIX_MERCHANT_NAME=nome_da_loja_opcional
+PIX_MERCHANT_CITY=cidade_da_conta_recebedora
 DISCORD_GUILD_ID=id_do_servidor_principal
 ORDER_CATEGORY_ID=opcional_id_da_categoria_de_pedidos
 TEST_COUPON_CODE=RYNEX-TEST

@@ -1,6 +1,8 @@
 const crypto = require('crypto');
+const QRCode = require('qrcode');
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   EmbedBuilder,
   PermissionsBitField,
   SlashCommandBuilder,
@@ -28,6 +30,8 @@ const COMMAND_NAMES = new Set([
   'config-site',
   'config-categoria-pedidos',
   'config-pix',
+  'gerarpix',
+  'pedido-pendentes',
   'pedido-aceitar',
   'pedido-recusar',
 ]);
@@ -44,6 +48,59 @@ function slugify(value) {
 
 function cleanText(value, max = 500) {
   return String(value ?? '').replace(/[<>]/g, '').trim().slice(0, max);
+}
+
+function emvField(id, value) {
+  const text = String(value ?? '');
+  const length = Buffer.byteLength(text, 'utf8');
+  if (length > 99) throw new Error(`Campo Pix ${id} excede 99 bytes.`);
+  return `${id}${String(length).padStart(2, '0')}${text}`;
+}
+
+function crc16Ccitt(text) {
+  let crc = 0xffff;
+  for (const byte of Buffer.from(text, 'utf8')) {
+    crc ^= byte << 8;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+function pixAscii(value, max, label) {
+  const text = String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9 .-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+  if (!text) throw new Error(`${label} é obrigatório para montar o QR Pix.`);
+  return text;
+}
+
+function buildStaticPixPayload({ key, amount, merchantName, city, info, txid }) {
+  const pixKey = String(key || '').trim();
+  if (!pixKey || Buffer.byteLength(pixKey, 'utf8') > 77 || /[\r\n<>]/.test(pixKey)) throw new Error('Configure uma chave Pix válida antes de gerar a cobrança.');
+  const account = emvField('00', 'br.gov.bcb.pix') + emvField('01', pixKey) + (info ? emvField('02', pixAscii(info, 64, 'Descrição')) : '');
+  const transactionId = String(txid || '***').replace(/[^A-Za-z0-9*]/g, '').slice(0, 25) || '***';
+  const fields = [
+    emvField('00', '01'),
+    emvField('26', account),
+    emvField('52', '0000'),
+    emvField('53', '986'),
+    ...(amount === undefined || amount === null ? [] : [emvField('54', Number(amount).toFixed(2))]),
+    emvField('58', 'BR'),
+    emvField('59', pixAscii(merchantName, 25, 'Nome do recebedor')),
+    emvField('60', pixAscii(city, 15, 'Cidade do recebedor').toUpperCase()),
+    emvField('62', emvField('05', transactionId)),
+  ].join('') + '6304';
+  return `${fields}${crc16Ccitt(fields)}`;
+}
+
+async function buildStaticPixPayment(cfg, amount, description, reference) {
+  const key = cfg.paymentPixKey || process.env.PIX_KEY || '';
+  const city = cfg.paymentPixCity || process.env.PIX_MERCHANT_CITY || '';
+  const merchantName = process.env.PIX_MERCHANT_NAME || cfg.storeSettings?.brandName || 'Rynex';
+  if (!key) return { mode: 'static_pix_manual', pixKey: null, copyPaste: null, qrCodeDataUrl: null, instructions: 'A equipe ainda precisa configurar a chave Pix com /config-pix.' };
+  if (!city) return { mode: 'static_pix_manual', pixKey: key, copyPaste: null, qrCodeDataUrl: null, instructions: 'A equipe ainda precisa configurar a cidade da conta recebedora com /config-pix.' };
+  const txid = `RX${String(reference || crypto.randomBytes(7).toString('hex')).replace(/[^A-Za-z0-9]/g, '').toUpperCase()}`.slice(0, 25);
+  const copyPaste = buildStaticPixPayload({ key, amount, merchantName, city, info: description, txid });
+  const qrCodeDataUrl = await QRCode.toDataURL(copyPaste, { errorCorrectionLevel: 'M', margin: 2, width: 460 });
+  return { mode: 'static_pix_manual', pixKey: key, copyPaste, qrCodeDataUrl, txid, instructions: 'Escaneie ou copie o código Pix. O pagamento será confirmado manualmente por um administrador.' };
 }
 
 function redact(value) {
@@ -173,9 +230,22 @@ function registerStoreCommands(slashCommands) {
       .toJSON(),
     new SlashCommandBuilder()
       .setName('config-pix')
-      .setDescription('Configura ou consulta, em resposta privada, a chave Pix da loja')
+      .setDescription('Configura ou consulta, em resposta privada, a chave e a cidade Pix')
       .addStringOption(option => option.setName('chave').setDescription('Nova chave Pix (opcional para apenas consultar)').setRequired(false))
+      .addStringOption(option => option.setName('cidade').setDescription('Cidade da conta recebedora para o QR (até 15 caracteres)').setRequired(false))
       .addBooleanOption(option => option.setName('limpar').setDescription('Remover a chave personalizada e voltar à variável PIX_KEY').setRequired(false))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('gerarpix')
+      .setDescription('Gera QR Pix estático e código copia-e-cola para uma cobrança')
+      .addNumberOption(option => option.setName('valor').setDescription('Valor em reais').setRequired(true).setMinValue(0.01))
+      .addStringOption(option => option.setName('nome').setDescription('Nome do cliente ou referência').setRequired(true).setMaxLength(60))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('pedido-pendentes')
+      .setDescription('Lista os pedidos aguardando confirmação manual de pagamento')
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -484,19 +554,19 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       total,
       status: total === 0 ? 'paid' : 'awaiting_payment',
       paymentStatus: total === 0 ? 'approved_by_coupon' : 'awaiting_pix',
-      paymentMethod: 'manual_pix',
+      paymentMethod: total === 0 ? 'coupon' : 'manual_pix_static',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: [],
     };
+    let payment = null;
+    if (total > 0) {
+      try { payment = await buildStaticPixPayment(cfg, total, `Pedido ${order.id}`, order.id); }
+      catch (error) { return sendJsonError(res, 400, 'pix_config_invalid', error.message); }
+    }
     db.storeOrders[order.id] = order;
     save();
     if (total === 0) await createDiscordOrderChannel(order).catch(error => console.error('Canal do pedido:', error.message));
-    const payment = total > 0 ? {
-      mode: 'manual_pix',
-      pixKey: cfg.paymentPixKey || process.env.PIX_KEY || null,
-      instructions: (cfg.paymentPixKey || process.env.PIX_KEY) ? 'Faça o Pix e envie o comprovante no atendimento. A equipe fará a confirmação manual.' : 'A chave Pix ainda não foi configurada pelo administrador.',
-    } : null;
     return res.status(201).json({ order, payment });
   });
 
@@ -622,11 +692,48 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     }
     if (command === 'config-pix') {
       const nextKey = interaction.options.getString('chave');
+      const nextCity = interaction.options.getString('cidade');
       const clearKey = interaction.options.getBoolean('limpar') === true;
-      if (clearKey) { delete cfg.paymentPixKey; save(); }
-      else if (nextKey !== null) { cfg.paymentPixKey = cleanText(nextKey, 180); save(); }
+      if (clearKey) { delete cfg.paymentPixKey; delete cfg.paymentPixCity; save(); }
+      else if (nextKey !== null || nextCity !== null) {
+        try {
+          if (nextKey !== null) cfg.paymentPixKey = cleanText(nextKey, 180);
+          if (nextCity !== null) cfg.paymentPixCity = pixAscii(nextCity, 15, 'Cidade');
+          save();
+        } catch (error) {
+          await interaction.reply({ content: error.message, ephemeral: true });
+          return true;
+        }
+      }
       const currentKey = cfg.paymentPixKey || process.env.PIX_KEY || '';
-      await interaction.reply({ content: currentKey ? `Chave Pix atual: ${currentKey}\nEsta resposta é privada; ela também é exibida ao cliente no checkout.` : 'Nenhuma chave Pix está configurada. Defina PIX_KEY no host ou use `/config-pix chave:...`.', ephemeral: true });
+      const currentCity = cfg.paymentPixCity || process.env.PIX_MERCHANT_CITY || '';
+      await interaction.reply({ content: currentKey ? `Chave Pix atual: ${currentKey}\nCidade: ${currentCity || 'não configurada'}\nResposta privada para administradores.` : 'Configure chave e cidade com `/config-pix chave:... cidade:...`. O nome do recebedor usa a marca definida em `/config-site`.', ephemeral: true });
+      return true;
+    }
+    if (command === 'gerarpix') {
+      const amount = interaction.options.getNumber('valor', true);
+      const name = cleanText(interaction.options.getString('nome', true), 60);
+      try {
+        const payment = await buildStaticPixPayment(cfg, amount, `Cliente ${name}`, `D${Date.now()}${crypto.randomBytes(4).toString('hex')}`);
+        if (!payment.copyPaste || !payment.qrCodeDataUrl) {
+          await interaction.reply({ content: `${payment.instructions}\nConfigure os dados com \/config-pix chave:... cidade:...`, ephemeral: true });
+          return true;
+        }
+        const image = Buffer.from(payment.qrCodeDataUrl.split(',')[1], 'base64');
+        await interaction.reply({
+          content: `**Pix Rynex — cobrança para ${name}**\nValor: **R$ ${amount.toFixed(2)}**\nChave Pix: \`${payment.pixKey}\`\n\nPix copia-e-cola:\n\`\`\`\n${payment.copyPaste}\n\`\`\`\nConfirme o recebimento no banco antes de marcar o pedido como pago. Esta cobrança exige confirmação manual.`,
+          files: [new AttachmentBuilder(image, { name: `pix-${payment.txid}.png` })],
+          ephemeral: true,
+        });
+      } catch (error) {
+        await interaction.reply({ content: `Não consegui montar o Pix: ${error.message}`, ephemeral: true });
+      }
+      return true;
+    }
+    if (command === 'pedido-pendentes') {
+      const pending = Object.values(db.storeOrders).filter(order => order.status === 'awaiting_payment').sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 10);
+      const lines = pending.map(order => `• \`${order.id}\` — ${cleanText(order.customerName, 60)} — R$ ${Number(order.total || 0).toFixed(2)}`);
+      await interaction.reply({ content: lines.length ? `**Pedidos aguardando Pix (${lines.length})**\n${lines.join('\n')}` : 'Não há pedidos aguardando confirmação Pix.', ephemeral: true });
       return true;
     }
     if (command === 'pedido-aceitar') {
@@ -665,4 +772,4 @@ function createStoreApi({ app, client, db, save, getGuild }) {
   };
 }
 
-module.exports = { createStoreApi, registerStoreCommands, ensureStore, publicCatalog };
+module.exports = { createStoreApi, registerStoreCommands, ensureStore, publicCatalog, buildStaticPixPayload };
