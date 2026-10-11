@@ -359,7 +359,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       res.setHeader('Vary', 'Origin');
     }
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS');
     if (req.method === 'OPTIONS' && origin && !allowedOrigins.has(origin) && process.env.CORS_ALLOW_ALL !== 'true') return res.status(403).end();
     if (req.method === 'OPTIONS') return res.status(204).end();
     next();
@@ -411,6 +411,43 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     const user = sessionUser(req);
     if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para continuar.');
     return res.json({ user: publicUser(user) });
+  });
+
+  app.put('/api/auth/profile', limitAuthAttempts, (req, res) => {
+    const user = sessionUser(req);
+    if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para editar sua conta.');
+    const name = cleanText(req.body?.name, 100);
+    const username = cleanText(req.body?.username, 40).toLowerCase();
+    const email = cleanText(req.body?.email, 160).toLowerCase();
+    if (name.length < 2 || username.length < 3 || !/^\S+@\S+\.\S+$/.test(email)) {
+      return sendJsonError(res, 400, 'invalid_input', 'Informe nome, usuário com pelo menos 3 caracteres e e-mail válido.');
+    }
+    const duplicate = Object.values(db.users).find(entry => entry.id !== user.id && (entry.email === email || entry.username === username));
+    if (duplicate) return sendJsonError(res, 409, 'user_exists', 'Este e-mail ou nome de usuário já está em uso.');
+    const newPassword = String(req.body?.newPassword || '');
+    if (newPassword && newPassword.length < 8) return sendJsonError(res, 400, 'invalid_password', 'A nova senha precisa ter pelo menos 8 caracteres.');
+    if (newPassword || email !== user.email) {
+      const currentPassword = String(req.body?.currentPassword || '');
+      if (!currentPassword) return sendJsonError(res, 400, 'invalid_password', 'Informe sua senha atual para alterar e-mail ou senha.');
+      const currentHash = crypto.scryptSync(currentPassword, user.salt, 64).toString('hex');
+      if (!crypto.timingSafeEqual(Buffer.from(currentHash, 'hex'), Buffer.from(user.passwordHash, 'hex'))) return sendJsonError(res, 401, 'invalid_password', 'A senha atual está incorreta.');
+    }
+    if (newPassword) {
+      user.salt = crypto.randomBytes(16).toString('hex');
+      user.passwordHash = crypto.scryptSync(newPassword, user.salt, 64).toString('hex');
+    }
+    user.name = name;
+    user.username = username;
+    user.email = email;
+    user.updatedAt = new Date().toISOString();
+    save();
+    return res.json({ user: publicUser(user) });
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (token && db.sessions[token]) { delete db.sessions[token]; save(); }
+    return res.json({ ok: true });
   });
 
   app.post('/api/store/orders', async (req, res) => {
