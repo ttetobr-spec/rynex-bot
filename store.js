@@ -27,6 +27,7 @@ const COMMAND_NAMES = new Set([
   'config-cupom',
   'config-site',
   'config-categoria-pedidos',
+  'config-pix',
   'pedido-aceitar',
   'pedido-recusar',
 ]);
@@ -168,6 +169,13 @@ function registerStoreCommands(slashCommands) {
       .setName('config-categoria-pedidos')
       .setDescription('Define a categoria do Discord que recebe os canais privados de pedidos')
       .addChannelOption(option => option.setName('categoria').setDescription('Categoria de canais do servidor').addChannelTypes(ChannelType.GuildCategory).setRequired(true))
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('config-pix')
+      .setDescription('Configura ou consulta, em resposta privada, a chave Pix da loja')
+      .addStringOption(option => option.setName('chave').setDescription('Nova chave Pix (opcional para apenas consultar)').setRequired(false))
+      .addBooleanOption(option => option.setName('limpar').setDescription('Remover a chave personalizada e voltar à variável PIX_KEY').setRequired(false))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -449,8 +457,8 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     if (total === 0) await createDiscordOrderChannel(order).catch(error => console.error('Canal do pedido:', error.message));
     const payment = total > 0 ? {
       mode: 'manual_pix',
-      pixKey: process.env.PIX_KEY || null,
-      instructions: process.env.PIX_KEY ? 'Faça o Pix e envie o comprovante no atendimento. A equipe fará a confirmação manual.' : 'A chave Pix ainda não foi configurada pelo administrador.',
+      pixKey: cfg.paymentPixKey || process.env.PIX_KEY || null,
+      instructions: (cfg.paymentPixKey || process.env.PIX_KEY) ? 'Faça o Pix e envie o comprovante no atendimento. A equipe fará a confirmação manual.' : 'A chave Pix ainda não foi configurada pelo administrador.',
     } : null;
     return res.status(201).json({ order, payment });
   });
@@ -573,6 +581,15 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       cfg.orderCategoryId = category.id;
       save();
       await interaction.reply({ content: `✅ Os canais de pedido serão criados em **${category.name}**.`, ephemeral: true });
+      return true;
+    }
+    if (command === 'config-pix') {
+      const nextKey = interaction.options.getString('chave');
+      const clearKey = interaction.options.getBoolean('limpar') === true;
+      if (clearKey) { delete cfg.paymentPixKey; save(); }
+      else if (nextKey !== null) { cfg.paymentPixKey = cleanText(nextKey, 180); save(); }
+      const currentKey = cfg.paymentPixKey || process.env.PIX_KEY || '';
+      await interaction.reply({ content: currentKey ? `Chave Pix atual: ${currentKey}\nEsta resposta é privada; ela também é exibida ao cliente no checkout.` : 'Nenhuma chave Pix está configurada. Defina PIX_KEY no host ou use `/config-pix chave:...`.', ephemeral: true });
       return true;
     }
     if (command === 'pedido-aceitar') {
