@@ -44,6 +44,10 @@ O painel mostra o botão **Loja, pedidos e cupom** com os comandos rápidos. O c
 
 O servidor HTTP expõe o catálogo, cadastro/login, pedidos e mensagens do atendimento. Minha conta aceita foto PNG/JPG/WEBP; o navegador reduz a imagem e a API valida formato e tamanho antes de guardar o avatar. No checkout, o backend chama o mesmo gerador Pix de `/gerarpix`, calcula a cobrança na criação do pedido e persiste QR e copia-e-cola para que o link de acompanhamento possa recuperá-los após login. Se a chave ainda não estiver configurada, a página permite tentar gerar o QR novamente depois que a equipe configurar `/config-pix`. O link compartilhável acompanha o pedido; não é uma URL de pagamento de provedor. O Pix desta etapa é estático: um administrador deve conferir o crédito no banco e confirmar no Discord, pois não há confirmação automática via webhook. O chat atualiza automaticamente e as mensagens da equipe no canal Discord aparecem no site. O backend calcula preços a partir do próprio catálogo e ignora valores enviados pelo navegador. Em produção, hospede o bot/API em um ambiente persistente com HTTPS, defina `ALLOWED_SITE_ORIGINS` e compile o site com `VITE_RYNEX_API_URL` apontando para essa API.
 
+## Conta e histórico no site
+
+O frontend mantém páginas separadas para `/login`, `/register`, `/account`, `/settings` e `/orders`, além de `/cart`. O endpoint `GET /api/store/orders` exige a sessão do cliente e retorna somente um resumo dos pedidos dessa própria conta; dados de pagamento detalhados e mensagens permanecem na rota autorizada do pedido individual. A troca de senha exige a senha atual. Recuperação por e-mail precisa de um serviço de envio seguro configurado pelo responsável pelo site.
+
 ## Variáveis de ambiente
 
 Copie `.env.example` para `.env` e preencha:

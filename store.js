@@ -544,6 +544,17 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     return res.json({ ok: true });
   });
 
+  app.get('/api/store/orders', (req, res) => {
+    const user = sessionUser(req);
+    if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para ver seus pedidos.');
+    const orders = Object.values(db.storeOrders)
+      .filter(order => order.userId === user.id)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 100)
+      .map(order => ({ id: order.id, items: order.items, total: order.total, status: order.status, createdAt: order.createdAt }));
+    return res.json({ orders });
+  });
+
   app.post('/api/store/orders', async (req, res) => {
     const user = sessionUser(req);
     if (!user) return sendJsonError(res, 401, 'unauthorized', 'Faça login para criar um pedido.');
