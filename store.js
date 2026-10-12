@@ -50,6 +50,24 @@ function cleanText(value, max = 500) {
   return String(value ?? '').replace(/[<>]/g, '').trim().slice(0, max);
 }
 
+function normalizeAvatarData(value) {
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string' || value.length > 260_000) throw new Error('A foto comprimida ultrapassa o limite permitido.');
+  const match = value.match(/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/i);
+  if (!match) throw new Error('Envie uma imagem PNG, JPG ou WEBP.');
+  const mime = match[1].toLowerCase();
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length > 180 * 1024) throw new Error('A foto precisa ter no máximo 180 KB depois de comprimida.');
+  if (bytes.toString('base64').replace(/=+$/, '') !== match[2].replace(/=+$/, '')) throw new Error('Arquivo de imagem inválido.');
+  const validSignature = mime === 'image/png'
+    ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    : mime === 'image/jpeg'
+      ? bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+      : bytes.length > 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
+  if (!validSignature) throw new Error('O conteúdo não corresponde ao formato da imagem.');
+  return `data:${mime};base64,${bytes.toString('base64')}`;
+}
+
 function emvField(id, value) {
   const text = String(value ?? '');
   const length = Buffer.byteLength(text, 'utf8');
@@ -306,7 +324,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     next();
   };
 
-  const publicUser = user => ({ id: user.id, name: user.name, username: user.username, email: user.email });
+  const publicUser = user => ({ id: user.id, name: user.name, username: user.username, email: user.email, avatar: user.avatar || null });
 
   const findOrder = id => db.storeOrders[String(id)] || null;
   const findOrderByChannel = channelId => Object.values(db.storeOrders).find(order => order.discordChannelId === channelId) || null;
@@ -455,7 +473,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     const id = crypto.randomUUID();
     const salt = crypto.randomBytes(16).toString('hex');
     const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
-    db.users[id] = { id, name, username, email, salt, passwordHash, createdAt: new Date().toISOString() };
+    db.users[id] = { id, name, username, email, avatar: null, salt, passwordHash, createdAt: new Date().toISOString() };
     const token = crypto.randomBytes(32).toString('hex');
     db.sessions[token] = { userId: id, createdAt: new Date().toISOString() };
     save();
@@ -494,6 +512,11 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     }
     const duplicate = Object.values(db.users).find(entry => entry.id !== user.id && (entry.email === email || entry.username === username));
     if (duplicate) return sendJsonError(res, 409, 'user_exists', 'Este e-mail ou nome de usuário já está em uso.');
+    let avatar = user.avatar || null;
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'avatar')) {
+      try { avatar = normalizeAvatarData(req.body.avatar); }
+      catch (error) { return sendJsonError(res, 400, 'invalid_avatar', error.message); }
+    }
     const newPassword = String(req.body?.newPassword || '');
     if (newPassword && newPassword.length < 8) return sendJsonError(res, 400, 'invalid_password', 'A nova senha precisa ter pelo menos 8 caracteres.');
     if (newPassword || email !== user.email) {
@@ -509,6 +532,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     user.name = name;
     user.username = username;
     user.email = email;
+    user.avatar = avatar;
     user.updatedAt = new Date().toISOString();
     save();
     return res.json({ user: publicUser(user) });
@@ -564,6 +588,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       try { payment = await buildStaticPixPayment(cfg, total, `Pedido ${order.id}`, order.id); }
       catch (error) { return sendJsonError(res, 400, 'pix_config_invalid', error.message); }
     }
+    order.payment = payment;
     db.storeOrders[order.id] = order;
     save();
     if (total === 0) await createDiscordOrderChannel(order).catch(error => console.error('Canal do pedido:', error.message));
@@ -574,6 +599,24 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     const order = findOrder(req.params.id);
     if (!authorizedOrder(req, order)) return sendJsonError(res, 403, 'forbidden', 'Você não tem acesso a este pedido.');
     return res.json({ order });
+  });
+
+  app.post('/api/store/orders/:id/payment', async (req, res) => {
+    const order = findOrder(req.params.id);
+    if (!authorizedOrder(req, order)) return sendJsonError(res, 403, 'forbidden', 'Você não tem acesso a este pedido.');
+    if (Number(order.total) <= 0 || ['paid', 'payment_rejected'].includes(order.status)) return sendJsonError(res, 409, 'payment_unavailable', 'Este pedido não aceita uma nova cobrança Pix.');
+    try {
+      const payment = await buildStaticPixPayment(getStoreConfig().cfg, Number(order.total), `Pedido ${order.id}`, order.id);
+      if (!payment.copyPaste || !payment.qrCodeDataUrl) return sendJsonError(res, 503, 'pix_not_configured', payment.instructions);
+      order.payment = payment;
+      order.paymentMethod = 'manual_pix_static';
+      order.paymentStatus = 'awaiting_pix';
+      order.updatedAt = new Date().toISOString();
+      save();
+      return res.json({ order, payment });
+    } catch (error) {
+      return sendJsonError(res, 400, 'pix_config_invalid', error.message);
+    }
   });
 
   app.get('/api/store/orders/:id/messages', (req, res) => {

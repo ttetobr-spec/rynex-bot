@@ -389,7 +389,7 @@ client.on('interactionCreate', async (interaction) => {
   } catch (err) { console.error('Interação expirada ou falhou:', err.code || err.message); if (!interaction.replied && !interaction.deferred) { try { await interaction.reply({ content: 'Este painel expirou. Digite `!painel` para abrir um novo.', ephemeral: true }); } catch (_) {} } }
 });
 
-const app = express(); app.use(express.json());
+const app = express(); app.use(express.json({ limit: '300kb' }));
 storeApi = createStoreApi({ app, client, db, save, getGuild });
 const panelKey = process.env.ADMIN_PANEL_KEY || '';
 app.get('/', (_, res) => res.send('<h1>Rynex online</h1><p>Bot Discord ativo.</p>'));
