@@ -150,7 +150,7 @@ function ensureStore(cfg) {
   cfg.storeCategories ||= [...DEFAULT_CATEGORIES];
   cfg.storeSettings ||= {
     brandName: 'Rynex',
-    heroTitle: 'Vista seu próximo sinal.',
+    heroTitle: 'God Human LV Max',
     supportEmail: '',
     checkoutNote: 'Pagamento manual via Pix. A entrega é feita pela equipe no atendimento.',
   };
