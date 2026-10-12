@@ -9,8 +9,23 @@ const {
   ChannelType,
 } = require('discord.js');
 
-const DEFAULT_CATEGORIES = ['Techwear', 'Essentials', 'Footwear', 'Accessories'];
+const DEFAULT_CATEGORIES = ['Techwear', 'Essentials', 'Footwear', 'Accessories', 'Blox Fruits'];
 const DEFAULT_PRODUCTS = [
+  {
+    id: 'blox-god-human-max',
+    name: 'CONTA COM GOD HUMAN E LV MAX',
+    category: 'Blox Fruits',
+    price: 1.10,
+    imageUrl: 'https://ttetobr-spec.github.io/Rynex/products/conta-god-human.webp',
+    description: 'Conta de Blox Fruits com God Human e nível máximo.',
+    tag: 'CONTA DIGITAL',
+    tone: 'violet',
+    code: 'BF01',
+    visual: 'account',
+    stock: 0,
+    digital: true,
+    active: true,
+  },
   { id: '1', name: 'Void Runner', category: 'Techwear', price: 289.9, tag: 'NEW DROP', tone: 'violet', code: '01', visual: 'jacket', description: 'Uma camada utilitária para atravessar o ruído. Corte arquitetônico, presença silenciosa e detalhes que respondem ao seu movimento.' },
   { id: '2', name: 'Neon Core', category: 'Essentials', price: 149.9, tag: 'BEST SELLER', tone: 'cyan', code: '02', visual: 'hoodie', description: 'O essencial, mas nunca óbvio. Uma base confortável com a energia visual da próxima frequência.' },
   { id: '3', name: 'Rift 01', category: 'Footwear', price: 399.9, tag: 'LIMITED', tone: 'orange', code: '03', visual: 'shoe', description: 'Um tênis projetado para mudar de direção. Volume expressivo, sola responsiva e acabamento de edição limitada.' },
@@ -148,6 +163,9 @@ function ensureStore(cfg) {
 
 function normalizeProduct(key, raw = {}) {
   const id = cleanText(raw.id || key || slugify(raw.name) || `produto-${Date.now()}`, 80);
+  const stock = raw.stock === null || raw.stock === undefined || raw.stock === ''
+    ? null
+    : Math.max(0, Math.floor(Number(raw.stock) || 0));
   return {
     id,
     name: cleanText(raw.name || key || 'Produto sem nome', 100),
@@ -160,6 +178,8 @@ function normalizeProduct(key, raw = {}) {
     tone: cleanText(raw.tone || 'violet', 30),
     visual: cleanText(raw.visual || 'tee', 30),
     code: cleanText(raw.code || String(id).slice(0, 4).toUpperCase(), 20),
+    stock,
+    digital: raw.digital === true,
     active: raw.active !== false,
   };
 }
@@ -192,6 +212,8 @@ function registerStoreCommands(slashCommands) {
       .addStringOption(option => option.setName('imagem').setDescription('URL da imagem').setRequired(false))
       .addStringOption(option => option.setName('url').setDescription('URL pública do produto').setRequired(false))
       .addStringOption(option => option.setName('descricao').setDescription('Descrição do produto').setRequired(false))
+      .addIntegerOption(option => option.setName('estoque').setDescription('Quantidade disponível; vazio = sem controle').setMinValue(0).setMaxValue(100000).setRequired(false))
+      .addBooleanOption(option => option.setName('digital').setDescription('Produto digital').setRequired(false))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -204,6 +226,8 @@ function registerStoreCommands(slashCommands) {
       .addStringOption(option => option.setName('imagem').setDescription('Nova URL da imagem').setRequired(false))
       .addStringOption(option => option.setName('url').setDescription('Nova URL pública').setRequired(false))
       .addStringOption(option => option.setName('descricao').setDescription('Nova descrição').setRequired(false))
+      .addIntegerOption(option => option.setName('estoque').setDescription('Nova quantidade disponível').setMinValue(0).setMaxValue(100000).setRequired(false))
+      .addBooleanOption(option => option.setName('digital').setDescription('Produto digital').setRequired(false))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -422,6 +446,14 @@ function createStoreApi({ app, client, db, save, getGuild }) {
   const rejectOrder = orderId => {
     const order = findOrder(orderId);
     if (!order) return null;
+    if (order.inventoryReservations && !order.inventoryReleasedAt) {
+      const { cfg } = getStoreConfig();
+      for (const [id, quantity] of Object.entries(order.inventoryReservations)) {
+        const product = cfg.products[id];
+        if (product && product.stock !== null && product.stock !== undefined) product.stock = Math.max(0, Math.floor(Number(product.stock) || 0)) + Number(quantity || 0);
+      }
+      order.inventoryReleasedAt = new Date().toISOString();
+    }
     order.paymentStatus = 'rejected';
     order.status = 'payment_rejected';
     order.updatedAt = new Date().toISOString();
@@ -561,6 +593,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     const { cfg } = getStoreConfig();
     const requestedItems = Array.isArray(req.body?.items) ? req.body.items.slice(0, 30) : [];
     const items = [];
+    const requestedStock = new Map();
     for (const requested of requestedItems) {
       const key = String(requested?.id ?? '');
       const rawProduct = cfg.products[key];
@@ -568,6 +601,9 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       const product = normalizeProduct(key, rawProduct);
       const quantity = Math.floor(Number(requested.quantity || 1));
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) return sendJsonError(res, 400, 'invalid_quantity', 'Quantidade de produto inválida.');
+      const totalRequested = (requestedStock.get(key) || 0) + quantity;
+      if (product.stock !== null && totalRequested > product.stock) return sendJsonError(res, 409, 'out_of_stock', product.stock === 0 ? `${product.name} está esgotado.` : `Estoque insuficiente para ${product.name}.`);
+      requestedStock.set(key, totalRequested);
       items.push({ id: product.id, name: product.name, price: product.price, quantity });
     }
     if (!items.length) return sendJsonError(res, 400, 'empty_order', 'O carrinho está vazio.');
@@ -600,6 +636,10 @@ function createStoreApi({ app, client, db, save, getGuild }) {
       catch (error) { return sendJsonError(res, 400, 'pix_config_invalid', error.message); }
     }
     order.payment = payment;
+    order.inventoryReservations = Object.fromEntries([...requestedStock.entries()].filter(([id]) => normalizeProduct(id, cfg.products[id]).stock !== null));
+    for (const [id, quantity] of Object.entries(order.inventoryReservations)) {
+      cfg.products[id].stock = normalizeProduct(id, cfg.products[id]).stock - quantity;
+    }
     db.storeOrders[order.id] = order;
     save();
     if (total === 0) await createDiscordOrderChannel(order).catch(error => console.error('Canal do pedido:', error.message));
@@ -671,6 +711,8 @@ function createStoreApi({ app, client, db, save, getGuild }) {
         imageUrl: interaction.options.getString('imagem') || '',
         url: interaction.options.getString('url') || '',
         description: interaction.options.getString('descricao') || '',
+        stock: interaction.options.getInteger('estoque'),
+        digital: interaction.options.getBoolean('digital') ?? false,
       });
       save();
       await interaction.reply({ content: `✅ Produto **${cfg.products[uniqueId].name}** adicionado com ID \`${uniqueId}\`.`, ephemeral: true });
@@ -690,6 +732,8 @@ function createStoreApi({ app, client, db, save, getGuild }) {
         imageUrl: interaction.options.getString('imagem'),
         url: interaction.options.getString('url'),
         description: interaction.options.getString('descricao'),
+        stock: interaction.options.getInteger('estoque'),
+        digital: interaction.options.getBoolean('digital'),
       };
       Object.keys(values).forEach(key => { if (values[key] !== null) current[key] = values[key]; });
       cfg.products[id] = current;
@@ -711,7 +755,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     if (command === 'produto-listar') {
       const list = Object.entries(cfg.products).map(([id, value]) => {
         const product = normalizeProduct(id, value);
-        return `• \`${id}\` — ${product.name} — R$ ${product.price.toFixed(2)} — ${product.category} — ${product.active ? 'ativo' : 'oculto'}`;
+        return `• \`${id}\` — ${product.name} — R$ ${product.price.toFixed(2)} — ${product.category} — ${product.stock === null ? 'estoque não controlado' : `estoque ${product.stock}`} — ${product.active ? 'ativo' : 'oculto'}`;
       });
       await interaction.reply({ content: list.length ? `**Catálogo Rynex**\n${list.join('\n').slice(0, 1850)}` : 'O catálogo ainda está vazio.', ephemeral: true });
       return true;
