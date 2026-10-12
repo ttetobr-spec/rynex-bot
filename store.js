@@ -23,6 +23,7 @@ const DEFAULT_PRODUCTS = [
     code: 'BF01',
     visual: 'account',
     stock: 0,
+    sortOrder: 0,
     digital: true,
     active: true,
   },
@@ -179,6 +180,7 @@ function normalizeProduct(key, raw = {}) {
     visual: cleanText(raw.visual || 'tee', 30),
     code: cleanText(raw.code || String(id).slice(0, 4).toUpperCase(), 20),
     stock,
+    sortOrder: Math.max(0, Math.floor(Number(raw.sortOrder ?? 100) || 0)),
     digital: raw.digital === true,
     active: raw.active !== false,
   };
@@ -188,7 +190,8 @@ function publicCatalog(cfg) {
   ensureStore(cfg);
   const products = Object.entries(cfg.products)
     .map(([key, product]) => normalizeProduct(key, product))
-    .filter(product => product.active);
+    .filter(product => product.active)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
   return {
     products,
     categories: cfg.storeCategories,
@@ -214,6 +217,7 @@ function registerStoreCommands(slashCommands) {
       .addStringOption(option => option.setName('descricao').setDescription('Descrição do produto').setRequired(false))
       .addIntegerOption(option => option.setName('estoque').setDescription('Quantidade disponível; vazio = sem controle').setMinValue(0).setMaxValue(100000).setRequired(false))
       .addBooleanOption(option => option.setName('digital').setDescription('Produto digital').setRequired(false))
+      .addIntegerOption(option => option.setName('ordem').setDescription('Posição no catálogo; menor aparece primeiro').setMinValue(0).setMaxValue(100000).setRequired(false))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -228,6 +232,7 @@ function registerStoreCommands(slashCommands) {
       .addStringOption(option => option.setName('descricao').setDescription('Nova descrição').setRequired(false))
       .addIntegerOption(option => option.setName('estoque').setDescription('Nova quantidade disponível').setMinValue(0).setMaxValue(100000).setRequired(false))
       .addBooleanOption(option => option.setName('digital').setDescription('Produto digital').setRequired(false))
+      .addIntegerOption(option => option.setName('ordem').setDescription('Posição no catálogo; menor aparece primeiro').setMinValue(0).setMaxValue(100000).setRequired(false))
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -713,6 +718,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
         description: interaction.options.getString('descricao') || '',
         stock: interaction.options.getInteger('estoque'),
         digital: interaction.options.getBoolean('digital') ?? false,
+        sortOrder: interaction.options.getInteger('ordem') ?? 100,
       });
       save();
       await interaction.reply({ content: `✅ Produto **${cfg.products[uniqueId].name}** adicionado com ID \`${uniqueId}\`.`, ephemeral: true });
@@ -734,6 +740,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
         description: interaction.options.getString('descricao'),
         stock: interaction.options.getInteger('estoque'),
         digital: interaction.options.getBoolean('digital'),
+        sortOrder: interaction.options.getInteger('ordem'),
       };
       Object.keys(values).forEach(key => { if (values[key] !== null) current[key] = values[key]; });
       cfg.products[id] = current;
@@ -755,7 +762,7 @@ function createStoreApi({ app, client, db, save, getGuild }) {
     if (command === 'produto-listar') {
       const list = Object.entries(cfg.products).map(([id, value]) => {
         const product = normalizeProduct(id, value);
-        return `• \`${id}\` — ${product.name} — R$ ${product.price.toFixed(2)} — ${product.category} — ${product.stock === null ? 'estoque não controlado' : `estoque ${product.stock}`} — ${product.active ? 'ativo' : 'oculto'}`;
+        return `• \`${id}\` — ${product.name} — R$ ${product.price.toFixed(2)} — ${product.category} — ${product.stock === null ? 'estoque não controlado' : `estoque ${product.stock}`} — ordem ${product.sortOrder} — ${product.active ? 'ativo' : 'oculto'}`;
       });
       await interaction.reply({ content: list.length ? `**Catálogo Rynex**\n${list.join('\n').slice(0, 1850)}` : 'O catálogo ainda está vazio.', ephemeral: true });
       return true;
